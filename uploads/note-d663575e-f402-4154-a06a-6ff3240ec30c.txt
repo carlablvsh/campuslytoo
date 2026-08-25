@@ -1,0 +1,10 @@
+bittorrent is a peer-to-peer protocol used for efficiently sharing large files between multiple users. Instead of downloading an entire file from one server, the file is divided into smaller pieces called chunks. Different peers can download different chunks from one another and upload the chunks they already have.
+
+A group of peers participating in the same file-sharing process is called a swarm. A peer that has the complete file is called a seed, while a peer that is still downloading the file is called a leech.
+
+bittorrent can use a tracker to help peers discover other peers participating in the same torrent. Trackerless bittorrent can use a DHT (Distributed Hash Table) for peer discovery.
+
+bittorrent improves efficiency by allowing multiple peers to upload and download simultaneously. It also uses the rarest-first strategy, where less commonly available file pieces are downloaded first, helping maintain piece availability across the network.
+
+conclusion:
+bittorrent is an efficient and scalable application of the peer-to-peer paradigm because file sharing is distributed among many peers instead of depending on a single central server.
