@@ -42,6 +42,26 @@ router.get('/', authenticateToken, async (req, res) => {
       LIMIT 1
     `, [req.userId, clientDate]);
 
+    // 3.5. Get upcoming exams (up to 4)
+    const upcomingExams = await dbAll(`
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM exams e
+      JOIN subjects s ON e.subject_id = s.id
+      WHERE e.user_id = ? AND e.date >= ?
+      ORDER BY e.date ASC, e.start_time ASC
+      LIMIT 4
+    `, [req.userId, clientDate]);
+
+    // 3.6. Get recent notes (up to 4)
+    const recentNotes = await dbAll(`
+      SELECT n.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM notes n
+      JOIN subjects s ON n.subject_id = s.id
+      WHERE n.user_id = ?
+      ORDER BY n.created_at DESC
+      LIMIT 4
+    `, [req.userId]);
+
     // 4. Calculate key quick statistics
     // Average attendance
     const subjects = await dbAll('SELECT id FROM subjects WHERE user_id = ?', [req.userId]);
@@ -73,14 +93,23 @@ router.get('/', authenticateToken, async (req, res) => {
     `, [req.userId]);
     const totalPendingAssignments = pendingCountRow ? pendingCountRow.count : 0;
 
+    // Total saved notes count
+    const notesCountRow = await dbGet(`
+      SELECT COUNT(*) as count FROM notes WHERE user_id = ?
+    `, [req.userId]);
+    const totalNotesSaved = notesCountRow ? notesCountRow.count : 0;
+
     res.json({
       classesToday,
       upcomingAssignments,
       nextExam,
+      upcomingExams,
+      recentNotes,
       stats: {
         averageAttendance,
         totalPendingAssignments,
-        totalSubjects: subjects.length
+        totalSubjects: subjects.length,
+        totalNotesSaved
       }
     });
 
