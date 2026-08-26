@@ -1,61 +1,129 @@
 import sqlite3 from 'sqlite3';
 import path from 'path';
+import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { createClient } from '@libsql/client';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const dbPath = path.resolve(__dirname, 'campusly.db');
-const db = new sqlite3.Database(dbPath, (err) => {
-  if (err) {
-    console.error('Error opening database', err.message);
-  } else {
-    console.log('Connected to SQLite database at:', dbPath);
-  }
-});
+const tursoUrl = process.env.TURSO_DATABASE_URL;
+const tursoToken = process.env.TURSO_AUTH_TOKEN;
+const useTurso = !!tursoUrl;
 
-// Helper utilities to wrap sqlite3 queries in Promises
+let db = null;
+let client = null;
+
+if (useTurso) {
+  client = createClient({
+    url: tursoUrl,
+    authToken: tursoToken
+  });
+  console.log('Connected to persistent Turso cloud database at:', tursoUrl);
+} else {
+  // Local SQLite fallback path
+  let dbPath = path.resolve(__dirname, 'campusly.db');
+
+  if (process.env.VERCEL) {
+    const tmpPath = '/tmp/campusly.db';
+    try {
+      if (!fs.existsSync(tmpPath)) {
+        fs.copyFileSync(dbPath, tmpPath);
+        console.log('Database copied to temporary write space:', tmpPath);
+      }
+      dbPath = tmpPath;
+    } catch (copyErr) {
+      console.error('Failed to copy database to write space:', copyErr);
+    }
+  }
+
+  db = new sqlite3.Database(dbPath, (err) => {
+    if (err) {
+      console.error('Error opening database', err.message);
+    } else {
+      console.log('Connected to SQLite database at:', dbPath);
+    }
+  });
+}
+
+// Helper utilities to wrap sqlite3 or Turso client queries in Promises
 export const dbRun = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.run(sql, params, function (err) {
-      if (err) {
+  if (useTurso) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const res = await client.execute({ sql, args: params });
+        const lastID = res.lastInsertRowid !== undefined ? Number(res.lastInsertRowid) : null;
+        resolve({ id: lastID, changes: res.rowsAffected });
+      } catch (err) {
         reject(err);
-      } else {
-        resolve({ id: this.lastID, changes: this.changes });
       }
     });
-  });
+  } else {
+    return new Promise((resolve, reject) => {
+      db.run(sql, params, function (err) {
+        if (err) {
+          reject(err);
+        } else {
+          resolve({ id: this.lastID, changes: this.changes });
+        }
+      });
+    });
+  }
 };
 
 export const dbGet = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.get(sql, params, (err, row) => {
-      if (err) {
+  if (useTurso) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const res = await client.execute({ sql, args: params });
+        resolve(res.rows[0] || undefined);
+      } catch (err) {
         reject(err);
-      } else {
-        resolve(row);
       }
     });
-  });
+  } else {
+    return new Promise((resolve, reject) => {
+      db.get(sql, params, (err, row) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(row);
+        }
+      });
+    });
+  }
 };
 
 export const dbAll = (sql, params = []) => {
-  return new Promise((resolve, reject) => {
-    db.all(sql, params, (err, rows) => {
-      if (err) {
+  if (useTurso) {
+    return new Promise(async (resolve, reject) => {
+      try {
+        const res = await client.execute({ sql, args: params });
+        resolve(res.rows || []);
+      } catch (err) {
         reject(err);
-      } else {
-        resolve(rows);
       }
     });
-  });
+  } else {
+    return new Promise((resolve, reject) => {
+      db.all(sql, params, (err, rows) => {
+        if (err) {
+          reject(err);
+        } else {
+          resolve(rows);
+        }
+      });
+    });
+  }
 };
 
 // Initialize database schema tables
 export const initDB = async () => {
   try {
-    // Enable Foreign Keys support
-    await dbRun('PRAGMA foreign_keys = ON;');
+    if (!useTurso) {
+      // Enable Foreign Keys support (disabled on Vercel to allow serverless stateless operation)
+      await dbRun(process.env.VERCEL ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;');
+    }
 
     // Users Table
     await dbRun(`
@@ -69,13 +137,19 @@ export const initDB = async () => {
       )
     `);
 
-    // Migration: Add avatar_url column to users table if it doesn't exist
+    // Migration: Add columns to users table if they don't exist
     try {
       await dbRun('ALTER TABLE users ADD COLUMN avatar_url TEXT');
-      console.log('Database migration: added avatar_url column to users table.');
-    } catch (err) {
-      // Safe to ignore if column already exists
-    }
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN reset_token TEXT');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN reset_token_expires DATETIME');
+      if (!useTurso) {
+        console.log('Database migration: verified user table columns.');
+      }
+    } catch (err) {}
 
     // Subjects Table
     await dbRun(`
@@ -170,6 +244,28 @@ export const initDB = async () => {
         FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+
+    // Notifications Table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS notifications (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        reference_id TEXT,
+        title TEXT NOT NULL,
+        message TEXT NOT NULL,
+        is_read INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Soften existing dark preset colors in SQLite database to pastel counterparts
+    await dbRun("UPDATE subjects SET color = '#ffd1dc' WHERE color = '#ef4444';");
+    await dbRun("UPDATE subjects SET color = '#cce4f6' WHERE color = '#06b6d4';");
+    await dbRun("UPDATE subjects SET color = '#e5dbfb' WHERE color = '#6366f1' OR color = '#8b5cf6';");
+    await dbRun("UPDATE subjects SET color = '#c7ebd7' WHERE color = '#10b981';");
+    await dbRun("UPDATE subjects SET color = '#ffecb3' WHERE color = '#f59e0b';");
 
     console.log('All database tables initialized successfully.');
   } catch (error) {

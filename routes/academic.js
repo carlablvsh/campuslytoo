@@ -130,6 +130,24 @@ router.post('/classes', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Subject not found or unauthorized.' });
     }
 
+    // Check for timetable conflict/overlapping classes
+    const existingClasses = await dbAll(`
+      SELECT c.*, s.name as subject_name 
+      FROM classes c
+      JOIN subjects s ON c.subject_id = s.id
+      WHERE s.user_id = ? AND c.day_of_week = ?
+    `, [req.userId, parseInt(day_of_week, 10)]);
+
+    const overlap = existingClasses.find(c => {
+      return start_time < c.end_time && end_time > c.start_time;
+    });
+
+    if (overlap) {
+      return res.status(409).json({ 
+        error: `Schedule conflict: This slot overlaps with ${overlap.subject_name} (${overlap.start_time} - ${overlap.end_time}).` 
+      });
+    }
+
     const classId = crypto.randomUUID();
     await dbRun(
       'INSERT INTO classes (id, subject_id, day_of_week, start_time, end_time, location) VALUES (?, ?, ?, ?, ?, ?)',

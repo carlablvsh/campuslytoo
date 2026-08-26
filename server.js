@@ -3,7 +3,10 @@ import cors from 'cors';
 import dotenv from 'dotenv';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { initDB } from './db.js';
+import { initDB, dbGet } from './db.js';
+import { authenticateToken } from './middleware/auth.js';
+import fs from 'fs';
+import jwt from 'jsonwebtoken';
 
 // Route imports
 import authRoutes from './routes/auth.js';
@@ -11,6 +14,7 @@ import dashboardRoutes from './routes/dashboard.js';
 import academicRoutes from './routes/academic.js';
 import notesRoutes from './routes/notes.js';
 import aiRoutes from './routes/ai.js';
+import notificationsRoutes from './routes/notifications.js';
 
 dotenv.config();
 
@@ -24,15 +28,61 @@ const PORT = process.env.PORT || 5000;
 await initDB();
 
 // Middleware
+const clientUrl = process.env.CLIENT_URL || '*';
 app.use(cors({
-  origin: '*', // Allow all client connections for simple local running
+  origin: clientUrl,
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 app.use(express.json());
 
-// Serve uploads folder statically (for attachments access if needed)
-app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+// Serve uploads folder with strict user-ownership checks and path-traversal protection
+app.get('/uploads/:filename', async (req, res) => {
+  try {
+    const { filename } = req.params;
+    
+    // Prevent path traversal by extracting the pure basename
+    const safeFilename = path.basename(filename);
+    const filePath = path.join(__dirname, 'uploads', safeFilename);
+    
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found.' });
+    }
+
+    // Public / general access for user avatars
+    if (safeFilename.startsWith('avatar-')) {
+      return res.sendFile(filePath);
+    }
+    
+    // Authenticated access check for notes: manually check JWT token
+    const authHeader = req.headers['authorization'];
+    const token = authHeader && authHeader.split(' ')[1];
+    
+    if (!token) {
+      return res.status(401).json({ error: 'Access denied: Session required for documents.' });
+    }
+    
+    try {
+      const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret_key');
+      
+      const note = await dbGet('SELECT user_id FROM notes WHERE file_name = ?', [safeFilename]);
+      if (!note) {
+        return res.status(403).json({ error: 'Access denied: File metadata mismatch.' });
+      }
+      
+      if (note.user_id !== decoded.userId) {
+        return res.status(403).json({ error: 'Access denied: You do not own this document.' });
+      }
+      
+      res.sendFile(filePath);
+    } catch (err) {
+      return res.status(403).json({ error: 'Access denied: Invalid session token.' });
+    }
+  } catch (err) {
+    console.error('File serving error:', err);
+    res.status(500).json({ error: 'Error fetching requested resource.' });
+  }
+});
 
 // Register API Routes
 app.use('/api/auth', authRoutes);
@@ -40,6 +90,7 @@ app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/academic', academicRoutes);
 app.use('/api/notes', notesRoutes);
 app.use('/api/ai', aiRoutes);
+app.use('/api/notifications', notificationsRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
@@ -59,3 +110,5 @@ app.listen(PORT, () => {
   console.log(` API Endpoint: http://localhost:${PORT}/api`);
   console.log(`================================================`);
 });
+
+export default app;

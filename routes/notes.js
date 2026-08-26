@@ -31,7 +31,18 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 5 * 1024 * 1024 } // 5MB limit
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    const allowedExts = /pdf|txt|md|markdown/;
+    const extname = allowedExts.test(path.extname(file.originalname).toLowerCase());
+    const mimetype = /pdf|text|plain|markdown/.test(file.mimetype) || file.mimetype === 'application/pdf' || file.mimetype === 'text/plain';
+    
+    if (extname && mimetype) {
+      return cb(null, true);
+    } else {
+      cb(new Error('Only study materials (PDF, TXT, MD) are allowed.'));
+    }
+  }
 });
 
 // Helper: Extract text from various files
@@ -172,7 +183,14 @@ router.post('/', authenticateToken, async (req, res) => {
 });
 
 // 4. Upload file attachment note
-router.post('/upload', authenticateToken, upload.single('file'), async (req, res) => {
+router.post('/upload', authenticateToken, (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message || 'File upload failed.' });
+    }
+    next();
+  });
+}, async (req, res) => {
   const { subject_id, title } = req.body;
   const file = req.file;
 

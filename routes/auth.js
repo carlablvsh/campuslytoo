@@ -6,8 +6,10 @@ import multer from 'multer';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import { dbRun, dbGet } from '../db.js';
+import { dbRun, dbGet, dbAll } from '../db.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { loginLimiter } from '../middleware/rateLimit.js';
+import { sendResetPasswordEmail } from '../utils/email.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -73,7 +75,7 @@ router.post('/register', async (req, res) => {
     );
 
     // Generate JWT
-    const token = jwt.sign({ userId }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ userId, username, email }, JWT_SECRET, { expiresIn: '7d' });
 
     res.status(201).json({
       token,
@@ -91,7 +93,7 @@ router.post('/register', async (req, res) => {
 });
 
 // Login Route
-router.post('/login', async (req, res) => {
+router.post('/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
@@ -112,7 +114,7 @@ router.post('/login', async (req, res) => {
     }
 
     // Generate JWT
-    const token = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: '7d' });
+    const token = jwt.sign({ userId: user.id, username: user.username, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
 
     res.json({
       token,
@@ -207,7 +209,14 @@ router.get('/me', authenticateToken, async (req, res) => {
 });
 
 // Upload Profile Picture (Authenticated)
-router.post('/avatar', authenticateToken, upload.single('avatar'), async (req, res) => {
+router.post('/avatar', authenticateToken, (req, res, next) => {
+  upload.single('avatar')(req, res, (err) => {
+    if (err) {
+      return res.status(400).json({ error: err.message || 'Image upload failed.' });
+    }
+    next();
+  });
+}, async (req, res) => {
   const file = req.file;
   if (!file) {
     return res.status(400).json({ error: 'Please upload an image file.' });
@@ -226,7 +235,9 @@ router.post('/avatar', authenticateToken, upload.single('avatar'), async (req, r
       }
     }
 
-    const avatarUrl = `http://localhost:5000/uploads/${file.filename}`;
+    const host = req.get('host');
+    const protocol = req.protocol;
+    const avatarUrl = `${protocol}://${host}/uploads/${file.filename}`;
     await dbRun('UPDATE users SET avatar_url = ? WHERE id = ?', [avatarUrl, req.userId]);
 
     const updatedUser = await dbGet('SELECT id, username, email, avatar_url FROM users WHERE id = ?', [req.userId]);
@@ -237,6 +248,106 @@ router.post('/avatar', authenticateToken, upload.single('avatar'), async (req, r
       fs.unlinkSync(file.path);
     }
     res.status(500).json({ error: err.message || 'Server error uploading profile picture.' });
+  }
+});
+
+// Forgot Password Route
+router.post('/forgot-password', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required.' });
+  }
+
+  try {
+    const user = await dbGet('SELECT id FROM users WHERE email = ?', [email]);
+    
+    // Always return a success message to prevent user enumeration
+    const successMsg = 'If this email exists in our system, we have sent a password reset token to it.';
+    if (!user) {
+      return res.json({ message: successMsg });
+    }
+
+    // Generate secure random token
+    const token = crypto.randomBytes(20).toString('hex');
+    const expires = Date.now() + 3600000; // 1 hour validity
+
+    await dbRun('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?', [token, expires, user.id]);
+
+    // Send the email using the SMTP service
+    await sendResetPasswordEmail(email, token);
+
+    res.json({ message: successMsg });
+  } catch (err) {
+    console.error('Forgot password error:', err);
+    res.status(500).json({ error: 'Server error handling password reset request.' });
+  }
+});
+
+// Reset Password Route
+router.post('/reset-password', async (req, res) => {
+  const { token, newPassword } = req.body;
+
+  if (!token || !newPassword) {
+    return res.status(400).json({ error: 'Token and new password are required.' });
+  }
+
+  if (newPassword.length < 6) {
+    return res.status(400).json({ error: 'Password must be at least 6 characters long.' });
+  }
+
+  try {
+    const user = await dbGet(
+      'SELECT id, reset_token_expires FROM users WHERE reset_token = ?',
+      [token]
+    );
+
+    if (!user) {
+      return res.status(400).json({ error: 'Password reset token is invalid.' });
+    }
+
+    const now = Date.now();
+    if (user.reset_token_expires < now) {
+      return res.status(400).json({ error: 'Password reset token has expired.' });
+    }
+
+    // Hash and store the new password
+    const salt = await bcrypt.genSalt(10);
+    const passwordHash = await bcrypt.hash(newPassword, salt);
+
+    await dbRun(
+      'UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?',
+      [passwordHash, user.id]
+    );
+
+    res.json({ message: 'Password has been reset successfully. You can now log in.' });
+  } catch (err) {
+    console.error('Reset password error:', err);
+    res.status(500).json({ error: 'Server error resetting password.' });
+  }
+});
+
+// Delete Account (Authenticated)
+router.delete('/account', authenticateToken, async (req, res) => {
+  try {
+    await dbRun('PRAGMA foreign_keys = ON;');
+    
+    // First, let's select and delete note files from the disk
+    const userNotes = await dbAll('SELECT file_name FROM notes WHERE user_id = ?', [req.userId]);
+    for (const note of userNotes) {
+      const filePath = path.join(uploadDir, note.file_name);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+      }
+    }
+    
+    // Delete the user from the database. Cascade will clean up everything else!
+    await dbRun('DELETE FROM users WHERE id = ?', [req.userId]);
+
+    res.json({ message: 'Account and all associated data deleted successfully.' });
+  } catch (err) {
+    console.error('Delete account error:', err);
+    res.status(500).json({ error: 'Server error deleting account.' });
   }
 });
 
