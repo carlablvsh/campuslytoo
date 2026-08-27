@@ -32,7 +32,11 @@ async function sendResendEmail({ to, subject, html, text }) {
     const data = await response.json();
 
     if (!response.ok) {
-      console.error('[RESEND EMAIL SERVICE] Resend API error response:', data);
+      if (data && data.name === 'validation_error' && data.message && data.message.includes('only send testing emails')) {
+        console.warn(`[RESEND NOTICE] Could not deliver email to ${to} because Resend is in Testing Mode (using onboarding@resend.dev). In testing mode, Resend ONLY delivers emails to the account owner (carlablvsh@gmail.com). To send to any email address, verify a domain at resend.com/domains!`);
+      } else {
+        console.error('[RESEND EMAIL SERVICE] Resend API error response:', data);
+      }
       return false;
     }
 
