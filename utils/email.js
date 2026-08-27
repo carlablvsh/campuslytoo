@@ -131,34 +131,27 @@ The Campusly Team`;
     </div>
   `;
 
-  // 1. Primary: Resend API
+  // 1. Primary: SMTP (Gmail / Custom SMTP)
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    try {
+      const fromAddress = process.env.SMTP_FROM || 'Campusly Support <campusly.noreply@gmail.com>';
+      const transporter = await getTransporter();
+      if (transporter) {
+        const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
+        console.log(`[EMAIL SERVICE] 📬 OTP email successfully sent to ${toEmail} via SMTP: ${info.messageId}`);
+        return { delivered: true };
+      }
+    } catch (err) {
+      console.error(`[EMAIL SERVICE] SMTP error sending to ${toEmail}:`, err);
+    }
+  }
+
+  // 2. Secondary: Resend API
   const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
   if (resendResult.success) {
     return { delivered: true };
   }
-  if (resendResult.isTestingRestriction) {
-    return { delivered: false, isTestingRestriction: true };
-  }
 
-  // 2. Fallback: SMTP / Ethereal
-  try {
-    const fromAddress = process.env.SMTP_FROM || 'Campusly Support <noreply@campusly.app>';
-    const transporter = await getTransporter();
-    if (transporter) {
-      const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
-      console.log(`[EMAIL SERVICE] OTP email sent to ${toEmail} via SMTP: ${info.messageId}`);
-      const previewUrl = nodemailer.getTestMessageUrl(info);
-      if (previewUrl) console.log(`[EMAIL SERVICE] 📬 Ethereal Preview: ${previewUrl}`);
-      return { delivered: true };
-    }
-  } catch (err) {
-    console.error(`[EMAIL SERVICE] SMTP fallback error for ${toEmail}:`, err);
-  }
-
-  // 3. Fallback: Local development console log (disabled in production)
-  if (!process.env.VERCEL && process.env.NODE_ENV === 'development') {
-    console.log(`[LOCAL DEV EMAIL] To: ${toEmail} | Code: ${otpCode}`);
-  }
   return { delivered: false };
 }
 
@@ -209,33 +202,26 @@ The Campusly Team`;
     </div>
   `;
 
-  // 1. Primary: Resend API
+  // 1. Primary: SMTP (Gmail / Custom SMTP)
+  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
+    try {
+      const fromAddress = process.env.SMTP_FROM || 'Campusly Support <campusly.noreply@gmail.com>';
+      const transporter = await getTransporter();
+      if (transporter) {
+        const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
+        console.log(`[EMAIL SERVICE] 📬 Password reset email successfully sent to ${toEmail} via SMTP: ${info.messageId}`);
+        return { delivered: true };
+      }
+    } catch (err) {
+      console.error(`[EMAIL SERVICE] SMTP error sending reset email to ${toEmail}:`, err);
+    }
+  }
+
+  // 2. Secondary: Resend API
   const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
   if (resendResult.success) {
     return { delivered: true };
   }
-  if (resendResult.isTestingRestriction) {
-    return { delivered: false, isTestingRestriction: true };
-  }
 
-  // 2. Fallback: SMTP / Ethereal
-  try {
-    const fromAddress = process.env.SMTP_FROM || 'Campusly Support <noreply@campusly.app>';
-    const transporter = await getTransporter();
-    if (transporter) {
-      const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
-      console.log(`[EMAIL SERVICE] Reset email sent to ${toEmail} via SMTP: ${info.messageId}`);
-      const previewUrl = nodemailer.getTestMessageUrl(info);
-      if (previewUrl) console.log(`[EMAIL SERVICE] 📬 Ethereal Preview: ${previewUrl}`);
-      return { delivered: true };
-    }
-  } catch (err) {
-    console.error(`[EMAIL SERVICE] SMTP fallback error for ${toEmail}:`, err);
-  }
-
-  // 3. Fallback: Local development console log (disabled in production)
-  if (!process.env.VERCEL && process.env.NODE_ENV === 'development') {
-    console.log(`[LOCAL DEV EMAIL] To: ${toEmail} | Reset Code: ${otpCode || resetToken}`);
-  }
   return { delivered: false };
 }
