@@ -1,6 +1,7 @@
 import express from 'express';
 import { dbAll, dbGet } from '../db.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { getOccurrencesForDateRange } from '../utils/scheduler.js';
 
 const router = express.Router();
 
@@ -13,14 +14,25 @@ router.get('/', authenticateToken, async (req, res) => {
   const clientDate = req.query.date || new Date().toISOString().split('T')[0];
 
   try {
-    // 1. Get today's classes
-    const classesToday = await dbAll(`
+    // 1. Fetch user classes, breaks, exceptions, events
+    const classes = await dbAll(`
       SELECT c.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
       FROM classes c
       JOIN subjects s ON c.subject_id = s.id
-      WHERE s.user_id = ? AND c.day_of_week = ?
-      ORDER BY c.start_time ASC
-    `, [req.userId, clientDay]);
+      WHERE s.user_id = ?
+    `, [req.userId]);
+
+    const breaks = await dbAll('SELECT * FROM breaks WHERE user_id = ?', [req.userId]);
+    const exceptions = await dbAll('SELECT * FROM class_exceptions WHERE user_id = ?', [req.userId]);
+    const events = await dbAll(`
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM calendar_events e
+      LEFT JOIN subjects s ON e.subject_id = s.id
+      WHERE e.user_id = ?
+    `, [req.userId]);
+
+    const classesToday = getOccurrencesForDateRange(classes, breaks, exceptions, events, clientDate, clientDate);
+    const activeBreak = breaks.find(b => clientDate >= b.start_date && clientDate <= b.end_date);
 
     // 2. Get upcoming deadlines (next 5 pending assignments)
     const upcomingAssignments = await dbAll(`
@@ -105,6 +117,7 @@ router.get('/', authenticateToken, async (req, res) => {
       nextExam,
       upcomingExams,
       recentNotes,
+      activeBreak: activeBreak ? { name: activeBreak.name, start_date: activeBreak.start_date, end_date: activeBreak.end_date } : null,
       stats: {
         averageAttendance,
         totalPendingAssignments,

@@ -13,7 +13,10 @@ import { sendResetPasswordEmail } from '../utils/email.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const uploadDir = path.join(__dirname, '..', 'uploads');
+const uploadDir = process.env.VERCEL 
+  ? '/tmp/uploads' 
+  : path.join(__dirname, '..', 'uploads');
+
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -83,7 +86,8 @@ router.post('/register', async (req, res) => {
         id: userId,
         username,
         email,
-        avatar_url: null
+        avatar_url: null,
+        hasGeminiKey: false
       }
     });
   } catch (err) {
@@ -122,7 +126,8 @@ router.post('/login', loginLimiter, async (req, res) => {
         id: user.id,
         username: user.username,
         email: user.email,
-        avatar_url: user.avatar_url
+        avatar_url: user.avatar_url,
+        hasGeminiKey: !!user.gemini_api_key
       }
     });
   } catch (err) {
@@ -197,14 +202,51 @@ router.put('/password', authenticateToken, async (req, res) => {
 // Get Current User Profile (Authenticated)
 router.get('/me', authenticateToken, async (req, res) => {
   try {
-    const user = await dbGet('SELECT id, username, email, avatar_url FROM users WHERE id = ?', [req.userId]);
+    const user = await dbGet('SELECT id, username, email, avatar_url, gemini_api_key FROM users WHERE id = ?', [req.userId]);
     if (!user) {
       return res.status(404).json({ error: 'User not found.' });
     }
-    res.json({ user });
+    res.json({ 
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        avatar_url: user.avatar_url,
+        hasGeminiKey: !!user.gemini_api_key
+      }
+    });
   } catch (err) {
     console.error('Fetch profile error:', err);
     res.status(500).json({ error: 'Server error fetching user profile.' });
+  }
+});
+
+// Save or Update Gemini API Key (Authenticated)
+router.post('/gemini-key', authenticateToken, async (req, res) => {
+  const { gemini_api_key } = req.body;
+
+  if (gemini_api_key === undefined) {
+    return res.status(400).json({ error: 'gemini_api_key is required.' });
+  }
+
+  try {
+    const keyToSave = gemini_api_key ? gemini_api_key.trim() : null;
+    await dbRun('UPDATE users SET gemini_api_key = ? WHERE id = ?', [keyToSave, req.userId]);
+    res.json({ message: 'Gemini API key updated successfully.', hasGeminiKey: !!keyToSave });
+  } catch (err) {
+    console.error('Update Gemini key error:', err);
+    res.status(500).json({ error: 'Server error updating Gemini key.' });
+  }
+});
+
+// Remove Gemini API Key (Authenticated)
+router.delete('/gemini-key', authenticateToken, async (req, res) => {
+  try {
+    await dbRun('UPDATE users SET gemini_api_key = NULL WHERE id = ?', [req.userId]);
+    res.json({ message: 'Gemini API key removed successfully.', hasGeminiKey: false });
+  } catch (err) {
+    console.error('Delete Gemini key error:', err);
+    res.status(500).json({ error: 'Server error removing Gemini key.' });
   }
 });
 
@@ -223,29 +265,29 @@ router.post('/avatar', authenticateToken, (req, res, next) => {
   }
 
   try {
-    // Optionally delete previous avatar file from server disk to save space
-    const oldUser = await dbGet('SELECT avatar_url FROM users WHERE id = ?', [req.userId]);
-    if (oldUser && oldUser.avatar_url) {
-      const oldFileName = oldUser.avatar_url.split('/uploads/')[1];
-      if (oldFileName) {
-        const oldFilePath = path.join(uploadDir, oldFileName);
-        if (fs.existsSync(oldFilePath)) {
-          fs.unlinkSync(oldFilePath);
-        }
-      }
-    }
+    // Read the file data and convert to base64
+    const fileData = fs.readFileSync(file.path);
+    const base64Image = fileData.toString('base64');
+    const avatarUrl = `data:${file.mimetype};base64,${base64Image}`;
 
-    const host = req.get('host');
-    const protocol = req.protocol;
-    const avatarUrl = `${protocol}://${host}/uploads/${file.filename}`;
+    // Update avatar_url in the database
     await dbRun('UPDATE users SET avatar_url = ? WHERE id = ?', [avatarUrl, req.userId]);
+
+    // Delete the temp file from disk
+    if (fs.existsSync(file.path)) {
+      fs.unlinkSync(file.path);
+    }
 
     const updatedUser = await dbGet('SELECT id, username, email, avatar_url FROM users WHERE id = ?', [req.userId]);
     res.json({ user: updatedUser });
   } catch (err) {
     console.error('Upload avatar error:', err);
     if (file && fs.existsSync(file.path)) {
-      fs.unlinkSync(file.path);
+      try {
+        fs.unlinkSync(file.path);
+      } catch (unlinkErr) {
+        // ignore
+      }
     }
     res.status(500).json({ error: err.message || 'Server error uploading profile picture.' });
   }

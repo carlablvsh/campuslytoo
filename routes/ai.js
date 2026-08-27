@@ -1,8 +1,82 @@
 import express from 'express';
-import { dbAll } from '../db.js';
+import multer from 'multer';
+import { dbAll, dbGet, dbRun } from '../db.js';
 import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage() });
+
+async function extractTimetableWithGemini(fileBuffer, mimeType, branch, semester, apiKey) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
+
+  const prompt = `You are a timetable extraction assistant. Analyze this college timetable document (image or PDF) and extract the schedule for the branch "${branch}" and semester "${semester}".
+  
+  Understand the visual grid, days of the week, time slots, subject names, abbreviations, subject codes, labs, and any key table included at the bottom mapping abbreviations to full subject names.
+  
+  CRITICAL RULES:
+  1. Only extract classes/labs relevant to the branch "${branch}" and semester "${semester}". Ignore classes for other branches.
+  2. Map abbreviations (e.g. "BDA", "MC") to their full subject names using the key/table in the document if present.
+  3. Format all times in HH:MM 24-hour format (e.g. "09:30"). If a class spans multiple slots, combine it into one block or split it, but make sure the start and end times are correct.
+  4. Day must be one of: Monday, Tuesday, Wednesday, Thursday, Friday, Saturday, Sunday.
+  5. Class type must be: 'lecture' or 'lab'.
+  6. DO NOT include lunch breaks, tea breaks, intervals, or empty/free slots.
+  7. Do not guess or invent data. If a field is missing, omit it or leave it blank.
+  
+  Return the output as a JSON array of objects with the following schema:
+  [
+    {
+      "day": "Monday",
+      "start_time": "09:00",
+      "end_time": "10:00",
+      "subject_name": "Full Subject Name",
+      "subject_code": "CS601",
+      "class_type": "lecture",
+      "room": "LH-201",
+      "faculty": "Dr. Smith"
+    }
+  ]`;
+
+  const payload = {
+    contents: [
+      {
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: mimeType,
+              data: fileBuffer.toString('base64')
+            }
+          }
+        ]
+      }
+    ],
+    generationConfig: {
+      responseMimeType: 'application/json',
+      temperature: 0.1
+    }
+  };
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify(payload)
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Gemini API error: ${response.status} - ${errorText}`);
+  }
+
+  const data = await response.json();
+  if (data.candidates && data.candidates[0] && data.candidates[0].content && data.candidates[0].content.parts[0]) {
+    const jsonText = data.candidates[0].content.parts[0].text;
+    return JSON.parse(jsonText);
+  }
+  
+  throw new Error('Unexpected response schema from Gemini API');
+}
 
 // Helper: Tokenize text into alphanumeric words
 function getWords(text) {
@@ -14,7 +88,7 @@ function getWords(text) {
 
 // REST Client fetch fallback for Gemini API
 async function askGemini(question, contexts, history, apiKey) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`;
   
   let systemPrompt = `You are Campusly, a warm, friendly student AI study buddy and academic companion.
 You speak like a supportive, cozy friend who helps the user study, explains concepts, keeps them motivated, and chats about student life. Use a warm tone, supportive emojis (e.g. 🌸, 📚, ✨, 💖, ✦), and clean markdown. Keep responses concise but friendly and helpful.`;
@@ -231,9 +305,6 @@ router.post('/ask', authenticateToken, async (req, res) => {
       topChunks = scoredChunks.slice(0, 8);
     }
 
-    // 4. Synthesize response
-    const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-    const DEEPSEEK_API_KEY = process.env.DEEPSEEK_API_KEY;
     const sources = Array.from(new Set(topChunks.map(c => JSON.stringify({
       id: c.noteId,
       title: c.noteTitle,
@@ -241,59 +312,66 @@ router.post('/ask', authenticateToken, async (req, res) => {
       color: c.color
     })))).map(s => JSON.parse(s));
 
-    const deepSeekKey = DEEPSEEK_API_KEY || (GEMINI_API_KEY && GEMINI_API_KEY.startsWith('sk-') ? GEMINI_API_KEY : null);
+    // 4. Synthesize response using user's custom key
+    try {
+      const userRow = await dbGet('SELECT gemini_api_key FROM users WHERE id = ?', [req.userId]);
+      const userGeminiKey = (userRow && userRow.gemini_api_key) ? userRow.gemini_api_key.trim() : null;
+      const systemKey = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : null;
+      const apiKey = userGeminiKey || systemKey;
 
-    if (deepSeekKey) {
-      try {
-        const deepseekAnswer = await askDeepSeek(question, topChunks, history, deepSeekKey);
-        return res.json({
-          answer: deepseekAnswer,
-          sources
-        });
-      } catch (deepseekErr) {
-        console.error('DeepSeek API call failed, falling back to local indexing:', deepseekErr);
+      if (!apiKey) {
+        return res.status(400).json({ error: 'GEMINI_KEY_MISSING', message: 'Power your Campusly AI: Connect your own Gemini API key to use AI features.' });
       }
-    } else if (GEMINI_API_KEY) {
-      try {
-        const geminiAnswer = await askGemini(question, topChunks, history, GEMINI_API_KEY);
-        return res.json({
-          answer: geminiAnswer,
-          sources
-        });
-      } catch (geminiErr) {
-        console.error('Gemini API call failed, falling back to local indexing:', geminiErr);
-      }
-    }
 
-    // Local Synthesis (Offline Fallback Mode)
-    if (topChunks.length === 0) {
+      const geminiAnswer = await askGemini(question, topChunks, history, apiKey);
       return res.json({
-        answer: `Hi there! I'm Campusly, your friendly AI study buddy! 🌸\n\nI'm currently running in **offline fallback mode** and couldn't find any relevant lecture notes to answer you locally.\n\nTo unlock my full conversational intelligence (like chatting like a real friend or helping you with detailed topics), ask your administrator to configure a \`DEEPSEEK_API_KEY\` or \`GEMINI_API_KEY\`!`,
-        sources: []
+        answer: geminiAnswer,
+        sources
       });
+    } catch (geminiErr) {
+      console.error('Gemini API call failed:', geminiErr);
+      return res.status(500).json({ error: `AI call failed: ${geminiErr.message}` });
     }
-
-    let localAnswer = `### Search Results from Study Notes\n\nI found the following matching information in your notes:\n\n`;
-    topChunks.forEach((chunk, index) => {
-      let textHighlighted = chunk.chunkText;
-      queryWords.forEach(qw => {
-        const escapedWord = qw.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        const r = new RegExp(`\\b(${escapedWord})\\b`, 'gi');
-        textHighlighted = textHighlighted.replace(r, '**$1**');
-      });
-      localAnswer += `**From "${chunk.noteTitle}" (${chunk.subjectName})**:\n> ${textHighlighted}\n\n`;
-    });
-
-    localAnswer += `\n*Note: Set the \`DEEPSEEK_API_KEY\` or \`GEMINI_API_KEY\` environment variable in the backend to enable full AI conversational summaries.*`;
-
-    res.json({
-      answer: localAnswer,
-      sources
-    });
-
   } catch (err) {
     console.error('AI assistant error:', err);
     res.status(500).json({ error: 'Server error processing academic question.' });
+  }
+});
+
+// Timetable AI importer endpoint
+router.post('/import-timetable', authenticateToken, upload.single('timetable'), async (req, res) => {
+  const { branch, semester } = req.body;
+  const file = req.file;
+
+  if (!branch || !semester) {
+    return res.status(400).json({ error: 'Branch and semester are required.' });
+  }
+
+  if (!file) {
+    return res.status(400).json({ error: 'Timetable file (image or PDF) is required.' });
+  }
+
+  try {
+    const userRow = await dbGet('SELECT gemini_api_key FROM users WHERE id = ?', [req.userId]);
+    const userGeminiKey = (userRow && userRow.gemini_api_key) ? userRow.gemini_api_key.trim() : null;
+    const systemKey = process.env.GEMINI_API_KEY ? process.env.GEMINI_API_KEY.trim() : null;
+    const apiKey = userGeminiKey || systemKey;
+
+    if (!apiKey) {
+      return res.status(400).json({ error: 'GEMINI_KEY_MISSING', message: 'Power your Campusly AI: Connect your own Gemini API key to use AI features.' });
+    }
+
+    const extractedData = await extractTimetableWithGemini(
+      file.buffer,
+      file.mimetype,
+      branch,
+      semester,
+      apiKey
+    );
+    res.json({ classes: extractedData });
+  } catch (err) {
+    console.error('AI Timetable extraction error:', err);
+    res.status(500).json({ error: `Failed to parse timetable: ${err.message}` });
   }
 });
 

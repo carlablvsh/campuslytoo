@@ -146,9 +146,15 @@ export const initDB = async () => {
     } catch (err) {}
     try {
       await dbRun('ALTER TABLE users ADD COLUMN reset_token_expires DATETIME');
-      if (!useTurso) {
-        console.log('Database migration: verified user table columns.');
-      }
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN spotify_access_token TEXT');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN spotify_refresh_token TEXT');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN spotify_token_expires_at INTEGER');
     } catch (err) {}
 
     // Subjects Table
@@ -173,7 +179,71 @@ export const initDB = async () => {
         start_time TEXT NOT NULL,      -- 'HH:MM'
         end_time TEXT NOT NULL,        -- 'HH:MM'
         location TEXT,
+        start_date TEXT,               -- 'YYYY-MM-DD'
+        end_date TEXT,                 -- 'YYYY-MM-DD'
+        recurrence_type TEXT DEFAULT 'weekly', -- 'none', 'weekly', 'biweekly', 'monthly', 'yearly', 'custom_days'
+        recurrence_days TEXT,          -- comma-separated list of day numbers (0=Sun, 1=Mon, etc.)
         FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Class Table Migration
+    try {
+      await dbRun('ALTER TABLE classes ADD COLUMN start_date TEXT');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE classes ADD COLUMN end_date TEXT');
+    } catch (err) {}
+    try {
+      await dbRun("ALTER TABLE classes ADD COLUMN recurrence_type TEXT DEFAULT 'weekly'");
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE classes ADD COLUMN recurrence_days TEXT');
+    } catch (err) {}
+
+    // Breaks Table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS breaks (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        start_date TEXT NOT NULL, -- 'YYYY-MM-DD'
+        end_date TEXT NOT NULL,   -- 'YYYY-MM-DD'
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Class Exceptions Table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS class_exceptions (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        class_id TEXT NOT NULL,
+        original_date TEXT NOT NULL, -- 'YYYY-MM-DD'
+        exception_type TEXT NOT NULL, -- 'skip', 'move'
+        new_date TEXT,               -- 'YYYY-MM-DD'
+        new_start_time TEXT,         -- 'HH:MM'
+        new_end_time TEXT,           -- 'HH:MM'
+        new_location TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(class_id) REFERENCES classes(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Calendar Events Table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS calendar_events (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        type TEXT NOT NULL,          -- 'class_extra', 'work', 'study', 'personal', 'other'
+        subject_id TEXT,             -- references subjects(id) ON DELETE SET NULL
+        date TEXT NOT NULL,          -- 'YYYY-MM-DD'
+        start_time TEXT NOT NULL,    -- 'HH:MM'
+        end_time TEXT NOT NULL,      -- 'HH:MM'
+        location TEXT,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY(subject_id) REFERENCES subjects(id) ON DELETE SET NULL
       )
     `);
 
@@ -260,14 +330,46 @@ export const initDB = async () => {
       )
     `);
 
-    // Soften existing dark preset colors in SQLite database to pastel counterparts
-    await dbRun("UPDATE subjects SET color = '#ffd1dc' WHERE color = '#ef4444';");
-    await dbRun("UPDATE subjects SET color = '#cce4f6' WHERE color = '#06b6d4';");
-    await dbRun("UPDATE subjects SET color = '#e5dbfb' WHERE color = '#6366f1' OR color = '#8b5cf6';");
-    await dbRun("UPDATE subjects SET color = '#c7ebd7' WHERE color = '#10b981';");
-    await dbRun("UPDATE subjects SET color = '#ffecb3' WHERE color = '#f59e0b';");
+    // Gamification XP Logs Table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS xp_logs (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        xp_amount INTEGER NOT NULL,
+        source TEXT NOT NULL,
+        reference_id TEXT,
+        metadata TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
 
-    console.log('All database tables initialized successfully.');
+    // Gamification User Achievements Table
+    await dbRun(`
+      CREATE TABLE IF NOT EXISTS user_achievements (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        achievement_id TEXT NOT NULL,
+        unlocked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, achievement_id),
+        FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    // Performance Indexes for fast queries
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_subjects_user ON subjects(user_id);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_classes_subject ON classes(subject_id);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_attendance_subject_date ON attendance_logs(subject_id, date);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_assignments_user ON assignments(user_id, status);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_exams_user ON exams(user_id);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_calendar_events_user ON calendar_events(user_id, date);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_xp_logs_user ON xp_logs(user_id);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_xp_logs_ref ON xp_logs(user_id, reference_id);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_user_achievements_user ON user_achievements(user_id);');
+    await dbRun('CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, is_read);');
+
+    console.log('All database tables and performance indexes initialized successfully.');
   } catch (error) {
     console.error('Error initializing database tables:', error);
   }

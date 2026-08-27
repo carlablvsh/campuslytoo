@@ -2,6 +2,8 @@ import express from 'express';
 import crypto from 'crypto';
 import { dbRun, dbGet, dbAll } from '../db.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { getOccurrencesForDateRange } from '../utils/scheduler.js';
+import { awardXP } from './gamification.js';
 
 const router = express.Router();
 
@@ -29,12 +31,20 @@ router.post('/subjects', authenticateToken, async (req, res) => {
   }
 
   try {
+    const existing = await dbGet(
+      'SELECT * FROM subjects WHERE user_id = ? AND (LOWER(code) = LOWER(?) OR LOWER(name) = LOWER(?))',
+      [req.userId, code.trim(), name.trim()]
+    );
+    if (existing) {
+      return res.status(200).json(existing);
+    }
+
     const subjectId = crypto.randomUUID();
     const target = target_attendance !== undefined ? parseInt(target_attendance, 10) : 75;
     
     await dbRun(
       'INSERT INTO subjects (id, user_id, name, code, target_attendance, color) VALUES (?, ?, ?, ?, ?, ?)',
-      [subjectId, req.userId, name, code, target, color]
+      [subjectId, req.userId, name.trim(), code.trim(), target, color]
     );
 
     const newSubject = await dbGet('SELECT * FROM subjects WHERE id = ?', [subjectId]);
@@ -117,11 +127,26 @@ router.get('/classes', authenticateToken, async (req, res) => {
 
 // Create timetable class
 router.post('/classes', authenticateToken, async (req, res) => {
-  const { subject_id, day_of_week, start_time, end_time, location } = req.body;
+  const { 
+    subject_id, 
+    day_of_week, 
+    start_time, 
+    end_time, 
+    location,
+    start_date,
+    end_date,
+    recurrence_type,
+    recurrence_days
+  } = req.body;
 
   if (subject_id === undefined || day_of_week === undefined || !start_time || !end_time) {
     return res.status(400).json({ error: 'subject_id, day_of_week, start_time, and end_time are required.' });
   }
+
+  const sDate = start_date || new Date().toISOString().split('T')[0];
+  const eDate = end_date || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const recType = recurrence_type || 'weekly';
+  const recDays = recurrence_days || null;
 
   try {
     // Verify subject belongs to user
@@ -135,14 +160,34 @@ router.post('/classes', authenticateToken, async (req, res) => {
       SELECT c.*, s.name as subject_name 
       FROM classes c
       JOIN subjects s ON c.subject_id = s.id
-      WHERE s.user_id = ? AND c.day_of_week = ?
-    `, [req.userId, parseInt(day_of_week, 10)]);
+      WHERE s.user_id = ?
+    `, [req.userId]);
 
     const overlap = existingClasses.find(c => {
+      const cStartDate = c.start_date || '1970-01-01';
+      const cEndDate = c.end_date || '2099-12-31';
+      const maxStart = sDate > cStartDate ? sDate : cStartDate;
+      const minEnd = eDate < cEndDate ? eDate : cEndDate;
+      if (maxStart > minEnd) return false;
+
+      const days1 = recType === 'custom_days' ? (recDays || '').split(',').map(Number) : [parseInt(day_of_week, 10)];
+      const days2 = c.recurrence_type === 'custom_days' ? (c.recurrence_days || '').split(',').map(Number) : [c.day_of_week];
+      const hasSharedDay = days1.some(d => days2.includes(d));
+      if (!hasSharedDay) return false;
+
       return start_time < c.end_time && end_time > c.start_time;
     });
 
     if (overlap) {
+      if (overlap.subject_id === subject_id && overlap.start_time === start_time && overlap.end_time === end_time) {
+        const existingClass = await dbGet(`
+          SELECT c.*, s.name as subject_name, s.code as subject_code, s.color as subject_color 
+          FROM classes c
+          JOIN subjects s ON c.subject_id = s.id
+          WHERE c.id = ?
+        `, [overlap.id]);
+        return res.status(200).json(existingClass);
+      }
       return res.status(409).json({ 
         error: `Schedule conflict: This slot overlaps with ${overlap.subject_name} (${overlap.start_time} - ${overlap.end_time}).` 
       });
@@ -150,8 +195,19 @@ router.post('/classes', authenticateToken, async (req, res) => {
 
     const classId = crypto.randomUUID();
     await dbRun(
-      'INSERT INTO classes (id, subject_id, day_of_week, start_time, end_time, location) VALUES (?, ?, ?, ?, ?, ?)',
-      [classId, subject_id, parseInt(day_of_week, 10), start_time, end_time, location || '']
+      'INSERT INTO classes (id, subject_id, day_of_week, start_time, end_time, location, start_date, end_date, recurrence_type, recurrence_days) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+      [
+        classId,
+        subject_id,
+        parseInt(day_of_week, 10),
+        start_time,
+        end_time,
+        location || '',
+        sDate,
+        eDate,
+        recType,
+        recDays
+      ]
     );
 
     const newClass = await dbGet(`
@@ -165,6 +221,107 @@ router.post('/classes', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Create class error:', err);
     res.status(500).json({ error: 'Server error creating timetable class.' });
+  }
+});
+
+// Update timetable class
+router.put('/classes/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { 
+    subject_id, 
+    day_of_week, 
+    start_time, 
+    end_time, 
+    location,
+    start_date,
+    end_date,
+    recurrence_type,
+    recurrence_days
+  } = req.body;
+
+  if (subject_id === undefined || day_of_week === undefined || !start_time || !end_time) {
+    return res.status(400).json({ error: 'subject_id, day_of_week, start_time, and end_time are required.' });
+  }
+
+  const sDate = start_date || new Date().toISOString().split('T')[0];
+  const eDate = end_date || new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
+  const recType = recurrence_type || 'weekly';
+  const recDays = recurrence_days || null;
+
+  try {
+    // Verify class exists and belongs to user
+    const existingClass = await dbGet(`
+      SELECT c.id FROM classes c 
+      JOIN subjects s ON c.subject_id = s.id 
+      WHERE c.id = ? AND s.user_id = ?
+    `, [id, req.userId]);
+
+    if (!existingClass) {
+      return res.status(404).json({ error: 'Class not found or unauthorized.' });
+    }
+
+    // Verify target subject belongs to user
+    const subject = await dbGet('SELECT * FROM subjects WHERE id = ? AND user_id = ?', [subject_id, req.userId]);
+    if (!subject) {
+      return res.status(404).json({ error: 'Subject not found or unauthorized.' });
+    }
+
+    // Check for timetable conflict/overlapping classes (excluding current class)
+    const existingClasses = await dbAll(`
+      SELECT c.*, s.name as subject_name 
+      FROM classes c
+      JOIN subjects s ON c.subject_id = s.id
+      WHERE s.user_id = ? AND c.id != ?
+    `, [req.userId, id]);
+
+    const overlap = existingClasses.find(c => {
+      const cStartDate = c.start_date || '1970-01-01';
+      const cEndDate = c.end_date || '2099-12-31';
+      const maxStart = sDate > cStartDate ? sDate : cStartDate;
+      const minEnd = eDate < cEndDate ? eDate : cEndDate;
+      if (maxStart > minEnd) return false;
+
+      const days1 = recType === 'custom_days' ? (recDays || '').split(',').map(Number) : [parseInt(day_of_week, 10)];
+      const days2 = c.recurrence_type === 'custom_days' ? (c.recurrence_days || '').split(',').map(Number) : [c.day_of_week];
+      const hasSharedDay = days1.some(d => days2.includes(d));
+      if (!hasSharedDay) return false;
+
+      return start_time < c.end_time && end_time > c.start_time;
+    });
+
+    if (overlap) {
+      return res.status(409).json({ 
+        error: `Schedule conflict: This slot overlaps with ${overlap.subject_name} (${overlap.start_time} - ${overlap.end_time}).` 
+      });
+    }
+
+    await dbRun(
+      'UPDATE classes SET subject_id = ?, day_of_week = ?, start_time = ?, end_time = ?, location = ?, start_date = ?, end_date = ?, recurrence_type = ?, recurrence_days = ? WHERE id = ?',
+      [
+        subject_id,
+        parseInt(day_of_week, 10),
+        start_time,
+        end_time,
+        location || '',
+        sDate,
+        eDate,
+        recType,
+        recDays,
+        id
+      ]
+    );
+
+    const updated = await dbGet(`
+      SELECT c.*, s.name as subject_name, s.code as subject_code, s.color as subject_color 
+      FROM classes c
+      JOIN subjects s ON c.subject_id = s.id
+      WHERE c.id = ?
+    `, [id]);
+
+    res.json(updated);
+  } catch (err) {
+    console.error('Update class error:', err);
+    res.status(500).json({ error: 'Server error updating timetable class.' });
   }
 });
 
@@ -252,6 +409,15 @@ router.post('/attendance', authenticateToken, async (req, res) => {
       'INSERT INTO attendance_logs (id, subject_id, date, status) VALUES (?, ?, ?, ?)',
       [logId, subject_id, date, status]
     );
+
+    // Award server-controlled XP for attended classes (deduplicated by subject_id + date)
+    if (status === 'present') {
+      await awardXP(req.userId, 'attendance_marked', 'attendance', `att_${subject_id}_${date}`, {
+        subject_name: subject.name,
+        subject_code: subject.code,
+        date
+      });
+    }
 
     res.status(201).json({ id: logId, subject_id, date, status });
   } catch (err) {
@@ -370,10 +536,25 @@ router.post('/assignments', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Subject not found or unauthorized.' });
     }
 
+    // Prevent accidental duplicate submission within the same minute
+    const recentDup = await dbGet(
+      'SELECT id FROM assignments WHERE user_id = ? AND subject_id = ? AND title = ? AND due_date = ? LIMIT 1',
+      [req.userId, subject_id, title.trim(), due_date]
+    );
+    if (recentDup) {
+      const existingAssignment = await dbGet(`
+        SELECT a.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+        FROM assignments a
+        JOIN subjects s ON a.subject_id = s.id
+        WHERE a.id = ?
+      `, [recentDup.id]);
+      return res.status(200).json(existingAssignment);
+    }
+
     const assignmentId = crypto.randomUUID();
     await dbRun(
       'INSERT INTO assignments (id, user_id, subject_id, title, description, due_date, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
-      [assignmentId, req.userId, subject_id, title, description || '', due_date, 'pending']
+      [assignmentId, req.userId, subject_id, title.trim(), description || '', due_date, 'pending']
     );
 
     const newAssignment = await dbGet(`
@@ -418,6 +599,14 @@ router.put('/assignments/:id', authenticateToken, async (req, res) => {
       JOIN subjects s ON a.subject_id = s.id
       WHERE a.id = ?
     `, [id]);
+
+    // Award server-controlled XP on marking assignment completed (deduplicated by assignment id)
+    if (updatedStatus === 'completed' && assignment.status !== 'completed') {
+      await awardXP(req.userId, 'assignment_completed', 'assignments', `ass_${id}`, {
+        assignment_title: updatedTitle,
+        subject_code: updatedAssignment?.subject_code
+      });
+    }
 
     res.json(updatedAssignment);
   } catch (err) {
@@ -480,10 +669,25 @@ router.post('/exams', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Subject not found or unauthorized.' });
     }
 
+    // Prevent duplicate exam creation
+    const dupExam = await dbGet(
+      'SELECT id FROM exams WHERE user_id = ? AND subject_id = ? AND title = ? AND date = ? AND start_time = ?',
+      [req.userId, subject_id, title.trim(), date, start_time]
+    );
+    if (dupExam) {
+      const existingExam = await dbGet(`
+        SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+        FROM exams e
+        JOIN subjects s ON e.subject_id = s.id
+        WHERE e.id = ?
+      `, [dupExam.id]);
+      return res.status(200).json(existingExam);
+    }
+
     const examId = crypto.randomUUID();
     await dbRun(
       'INSERT INTO exams (id, user_id, subject_id, title, date, start_time, location, syllabus) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-      [examId, req.userId, subject_id, title, date, start_time, location || '', syllabus || '']
+      [examId, req.userId, subject_id, title.trim(), date, start_time, location || '', syllabus || '']
     );
 
     const newExam = await dbGet(`
@@ -607,6 +811,422 @@ router.post('/calendar-notes', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Upsert calendar note error:', err);
     res.status(500).json({ error: 'Server error saving calendar note.' });
+  }
+});
+
+// Batch import save timetable classes
+router.post('/classes/import', authenticateToken, async (req, res) => {
+  const { classes } = req.body; // Array of { day, start_time, end_time, subject_name, subject_code, class_type, room }
+
+  if (!classes || !Array.isArray(classes)) {
+    return res.status(400).json({ error: 'An array of classes is required.' });
+  }
+
+  try {
+    // 1. Fetch user's existing subjects and classes
+    const existingSubjects = await dbAll('SELECT * FROM subjects WHERE user_id = ?', [req.userId]);
+    const subjectsMap = new Map(); // code/name -> subjectId
+    existingSubjects.forEach(s => {
+      subjectsMap.set(s.code.toLowerCase(), s.id);
+      subjectsMap.set(s.name.toLowerCase(), s.id);
+    });
+
+    const pastelColors = ['#ffd1dc', '#cce4f6', '#e5dbfb', '#c7ebd7', '#ffecb3', '#ffe2cb'];
+
+    // Map day strings to integers: 0=Sunday, 1=Monday, ..., 6=Saturday
+    const dayMap = {
+      'sunday': 0, 'sun': 0,
+      'monday': 1, 'mon': 1,
+      'tuesday': 2, 'tue': 2,
+      'wednesday': 3, 'wed': 3,
+      'thursday': 4, 'thu': 4,
+      'friday': 5, 'fri': 5,
+      'saturday': 6, 'sat': 6
+    };
+
+    const savedClasses = [];
+
+    for (const item of classes) {
+      const { day, start_time, end_time, subject_name, subject_code, class_type, room } = item;
+      
+      const dayLower = day ? day.toLowerCase().trim() : '';
+      const dayOfWeek = dayMap[dayLower] !== undefined ? dayMap[dayLower] : 1; // Default to Monday if not matched
+      
+      const cleanTime = (t) => {
+        if (!t) return '';
+        const match = t.match(/(\d{1,2}):(\d{2})/);
+        if (match) {
+          const hours = match[1].padStart(2, '0');
+          const minutes = match[2];
+          return `${hours}:${minutes}`;
+        }
+        return t;
+      };
+
+      const cleanStart = cleanTime(start_time);
+      const cleanEnd = cleanTime(end_time);
+
+      if (!subject_name || !cleanStart || !cleanEnd) continue;
+
+      // Resolve/create subject
+      let subjectId = null;
+      const codeKey = (subject_code || subject_name).toLowerCase().trim();
+      const nameKey = subject_name.toLowerCase().trim();
+
+      if (subjectsMap.has(codeKey)) {
+        subjectId = subjectsMap.get(codeKey);
+      } else if (subjectsMap.has(nameKey)) {
+        subjectId = subjectsMap.get(nameKey);
+      } else {
+        // Create new subject
+        subjectId = crypto.randomUUID();
+        const randomColor = pastelColors[Math.floor(Math.random() * pastelColors.length)];
+        await dbRun(
+          'INSERT INTO subjects (id, user_id, name, code, target_attendance, color) VALUES (?, ?, ?, ?, ?, ?)',
+          [subjectId, req.userId, subject_name, subject_code || subject_name.substring(0, 5).toUpperCase(), 75, randomColor]
+        );
+        subjectsMap.set(codeKey, subjectId);
+        subjectsMap.set(nameKey, subjectId);
+      }
+
+      // Check overlapping for this user's day slot
+      const existing = await dbAll(
+        'SELECT * FROM classes WHERE subject_id IN (SELECT id FROM subjects WHERE user_id = ?) AND day_of_week = ?',
+        [req.userId, dayOfWeek]
+      );
+      
+      const duplicateClass = existing.find(c => 
+        c.subject_id === subjectId && 
+        c.start_time === cleanStart && 
+        c.end_time === cleanEnd
+      );
+
+      if (duplicateClass) {
+        await dbRun('UPDATE classes SET location = ? WHERE id = ?', [room || '', duplicateClass.id]);
+        savedClasses.push(duplicateClass);
+        continue;
+      }
+
+      const conflictingIds = existing.filter(c => cleanStart < c.end_time && cleanEnd > c.start_time).map(c => c.id);
+      for (const cId of conflictingIds) {
+        await dbRun('DELETE FROM classes WHERE id = ?', [cId]);
+      }
+
+      // Create class
+      const classId = crypto.randomUUID();
+      await dbRun(
+        'INSERT INTO classes (id, subject_id, day_of_week, start_time, end_time, location) VALUES (?, ?, ?, ?, ?, ?)',
+        [classId, subjectId, dayOfWeek, cleanStart, cleanEnd, room || '']
+      );
+
+      savedClasses.push({
+        id: classId,
+        subject_id: subjectId,
+        day_of_week: dayOfWeek,
+        start_time: cleanStart,
+        end_time: cleanEnd,
+        location: room || ''
+      });
+    }
+
+    res.status(201).json({ success: true, count: savedClasses.length });
+  } catch (err) {
+    console.error('Batch create classes error:', err);
+    res.status(500).json({ error: 'Server error saving imported timetable.' });
+  }
+});
+
+// ==========================================
+// 6. BREAKS ENDPOINTS
+// ==========================================
+
+// Get all breaks
+router.get('/breaks', authenticateToken, async (req, res) => {
+  try {
+    const breaks = await dbAll('SELECT * FROM breaks WHERE user_id = ? ORDER BY start_date ASC', [req.userId]);
+    res.json(breaks);
+  } catch (err) {
+    console.error('Fetch breaks error:', err);
+    res.status(500).json({ error: 'Server error fetching breaks.' });
+  }
+});
+
+// Create break
+router.post('/breaks', authenticateToken, async (req, res) => {
+  const { name, start_date, end_date } = req.body;
+
+  if (!name || !start_date || !end_date) {
+    return res.status(400).json({ error: 'name, start_date, and end_date are required.' });
+  }
+
+  try {
+    const breakId = crypto.randomUUID();
+    await dbRun(
+      'INSERT INTO breaks (id, user_id, name, start_date, end_date) VALUES (?, ?, ?, ?, ?)',
+      [breakId, req.userId, name, start_date, end_date]
+    );
+
+    const newBreak = await dbGet('SELECT * FROM breaks WHERE id = ?', [breakId]);
+    res.status(201).json(newBreak);
+  } catch (err) {
+    console.error('Create break error:', err);
+    res.status(500).json({ error: 'Server error creating break period.' });
+  }
+});
+
+// Delete break
+router.delete('/breaks/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const existing = await dbGet('SELECT id FROM breaks WHERE id = ? AND user_id = ?', [id, req.userId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Break not found or unauthorized.' });
+    }
+
+    await dbRun('DELETE FROM breaks WHERE id = ?', [id]);
+    res.json({ message: 'Break period deleted.' });
+  } catch (err) {
+    console.error('Delete break error:', err);
+    res.status(500).json({ error: 'Server error deleting break period.' });
+  }
+});
+
+// ==========================================
+// 7. CALENDAR EVENTS ENDPOINTS (WORK, STUDY, ETC.)
+// ==========================================
+
+// Get all calendar events
+router.get('/calendar-events', authenticateToken, async (req, res) => {
+  try {
+    const events = await dbAll(`
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM calendar_events e
+      LEFT JOIN subjects s ON e.subject_id = s.id
+      WHERE e.user_id = ?
+      ORDER BY e.date ASC, e.start_time ASC
+    `, [req.userId]);
+    res.json(events);
+  } catch (err) {
+    console.error('Fetch calendar events error:', err);
+    res.status(500).json({ error: 'Server error fetching calendar events.' });
+  }
+});
+
+// Create calendar event
+router.post('/calendar-events', authenticateToken, async (req, res) => {
+  const { title, type, subject_id, date, start_time, end_time, location } = req.body;
+
+  if (!title || !type || !date || !start_time || !end_time) {
+    return res.status(400).json({ error: 'title, type, date, start_time, and end_time are required.' });
+  }
+
+  try {
+    if (subject_id) {
+      const subject = await dbGet('SELECT id FROM subjects WHERE id = ? AND user_id = ?', [subject_id, req.userId]);
+      if (!subject) {
+        return res.status(404).json({ error: 'Subject not found or unauthorized.' });
+      }
+    }
+
+    const eventId = crypto.randomUUID();
+    await dbRun(`
+      INSERT INTO calendar_events (id, user_id, title, type, subject_id, date, start_time, end_time, location)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `, [eventId, req.userId, title, type, subject_id || null, date, start_time, end_time, location || '']);
+
+    const newEvent = await dbGet(`
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM calendar_events e
+      LEFT JOIN subjects s ON e.subject_id = s.id
+      WHERE e.id = ?
+    `, [eventId]);
+
+    res.status(201).json(newEvent);
+  } catch (err) {
+    console.error('Create calendar event error:', err);
+    res.status(500).json({ error: 'Server error creating calendar event.' });
+  }
+});
+
+// Update calendar event
+router.put('/calendar-events/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  const { title, type, subject_id, date, start_time, end_time, location } = req.body;
+
+  if (!title || !type || !date || !start_time || !end_time) {
+    return res.status(400).json({ error: 'title, type, date, start_time, and end_time are required.' });
+  }
+
+  try {
+    const existing = await dbGet('SELECT id FROM calendar_events WHERE id = ? AND user_id = ?', [id, req.userId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Calendar event not found or unauthorized.' });
+    }
+
+    if (subject_id) {
+      const subject = await dbGet('SELECT id FROM subjects WHERE id = ? AND user_id = ?', [subject_id, req.userId]);
+      if (!subject) {
+        return res.status(404).json({ error: 'Subject not found or unauthorized.' });
+      }
+    }
+
+    await dbRun(`
+      UPDATE calendar_events
+      SET title = ?, type = ?, subject_id = ?, date = ?, start_time = ?, end_time = ?, location = ?
+      WHERE id = ? AND user_id = ?
+    `, [title, type, subject_id || null, date, start_time, end_time, location || '', id, req.userId]);
+
+    const updatedEvent = await dbGet(`
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM calendar_events e
+      LEFT JOIN subjects s ON e.subject_id = s.id
+      WHERE e.id = ?
+    `, [id]);
+
+    res.json(updatedEvent);
+  } catch (err) {
+    console.error('Update calendar event error:', err);
+    res.status(500).json({ error: 'Server error updating calendar event.' });
+  }
+});
+
+// Delete calendar event
+router.delete('/calendar-events/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const existing = await dbGet('SELECT id FROM calendar_events WHERE id = ? AND user_id = ?', [id, req.userId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Calendar event not found or unauthorized.' });
+    }
+
+    await dbRun('DELETE FROM calendar_events WHERE id = ?', [id]);
+    res.json({ message: 'Calendar event deleted.' });
+  } catch (err) {
+    console.error('Delete calendar event error:', err);
+    res.status(500).json({ error: 'Server error deleting calendar event.' });
+  }
+});
+
+// ==========================================
+// 8. CLASS EXCEPTIONS ENDPOINTS (SKIP / MOVE)
+// ==========================================
+
+// Get all exceptions
+router.get('/class-exceptions', authenticateToken, async (req, res) => {
+  try {
+    const exceptions = await dbAll('SELECT * FROM class_exceptions WHERE user_id = ?', [req.userId]);
+    res.json(exceptions);
+  } catch (err) {
+    console.error('Fetch class exceptions error:', err);
+    res.status(500).json({ error: 'Server error fetching class exceptions.' });
+  }
+});
+
+// Create/Update exception
+router.post('/class-exceptions', authenticateToken, async (req, res) => {
+  const { 
+    class_id, 
+    original_date, 
+    exception_type, 
+    new_date, 
+    new_start_time, 
+    new_end_time, 
+    new_location 
+  } = req.body;
+
+  if (!class_id || !original_date || !exception_type) {
+    return res.status(400).json({ error: 'class_id, original_date, and exception_type are required.' });
+  }
+
+  try {
+    // Verify class belongs to user
+    const classItem = await dbGet(`
+      SELECT c.id FROM classes c 
+      JOIN subjects s ON c.subject_id = s.id 
+      WHERE c.id = ? AND s.user_id = ?
+    `, [class_id, req.userId]);
+
+    if (!classItem) {
+      return res.status(404).json({ error: 'Class not found or unauthorized.' });
+    }
+
+    const existing = await dbGet('SELECT id FROM class_exceptions WHERE user_id = ? AND class_id = ? AND original_date = ?', [req.userId, class_id, original_date]);
+    
+    if (existing) {
+      await dbRun(`
+        UPDATE class_exceptions
+        SET exception_type = ?, new_date = ?, new_start_time = ?, new_end_time = ?, new_location = ?
+        WHERE id = ?
+      `, [exception_type, new_date || null, new_start_time || null, new_end_time || null, new_location || null, existing.id]);
+      
+      const updated = await dbGet('SELECT * FROM class_exceptions WHERE id = ?', [existing.id]);
+      res.json(updated);
+    } else {
+      const exceptionId = crypto.randomUUID();
+      await dbRun(`
+        INSERT INTO class_exceptions (id, user_id, class_id, original_date, exception_type, new_date, new_start_time, new_end_time, new_location)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `, [exceptionId, req.userId, class_id, original_date, exception_type, new_date || null, new_start_time || null, new_end_time || null, new_location || null]);
+
+      const created = await dbGet('SELECT * FROM class_exceptions WHERE id = ?', [exceptionId]);
+      res.status(201).json(created);
+    }
+  } catch (err) {
+    console.error('Save class exception error:', err);
+    res.status(500).json({ error: 'Server error saving class exception.' });
+  }
+});
+
+// Delete class exception
+router.delete('/class-exceptions/:id', authenticateToken, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const existing = await dbGet('SELECT id FROM class_exceptions WHERE id = ? AND user_id = ?', [id, req.userId]);
+    if (!existing) {
+      return res.status(404).json({ error: 'Class exception not found or unauthorized.' });
+    }
+
+    await dbRun('DELETE FROM class_exceptions WHERE id = ?', [id]);
+    res.json({ message: 'Class exception deleted.' });
+  } catch (err) {
+    console.error('Delete class exception error:', err);
+    res.status(500).json({ error: 'Server error deleting class exception.' });
+  }
+});
+
+// ==========================================
+// 9. UNIFIED SCHEDULER OCCURRENCE TIMELINE
+// ==========================================
+
+router.get('/calendar/occurrences', authenticateToken, async (req, res) => {
+  const { startDate, endDate } = req.query;
+
+  if (!startDate || !endDate) {
+    return res.status(400).json({ error: 'startDate and endDate parameters are required (YYYY-MM-DD).' });
+  }
+
+  try {
+    const classes = await dbAll(`
+      SELECT c.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM classes c
+      JOIN subjects s ON c.subject_id = s.id
+      WHERE s.user_id = ?
+    `, [req.userId]);
+
+    const breaks = await dbAll('SELECT * FROM breaks WHERE user_id = ?', [req.userId]);
+    const exceptions = await dbAll('SELECT * FROM class_exceptions WHERE user_id = ?', [req.userId]);
+    const events = await dbAll(`
+      SELECT e.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
+      FROM calendar_events e
+      LEFT JOIN subjects s ON e.subject_id = s.id
+      WHERE e.user_id = ?
+    `, [req.userId]);
+
+    const occurrences = getOccurrencesForDateRange(classes, breaks, exceptions, events, startDate, endDate);
+    res.json(occurrences);
+  } catch (err) {
+    console.error('Fetch occurrences error:', err);
+    res.status(500).json({ error: 'Server error computing calendar schedule.' });
   }
 });
 

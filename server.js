@@ -15,6 +15,8 @@ import academicRoutes from './routes/academic.js';
 import notesRoutes from './routes/notes.js';
 import aiRoutes from './routes/ai.js';
 import notificationsRoutes from './routes/notifications.js';
+import spotifyRoutes from './routes/spotify.js';
+import gamificationRoutes from './routes/gamification.js';
 
 dotenv.config();
 
@@ -40,10 +42,10 @@ app.use(express.json());
 app.get('/uploads/:filename', async (req, res) => {
   try {
     const { filename } = req.params;
-    
-    // Prevent path traversal by extracting the pure basename
     const safeFilename = path.basename(filename);
-    const filePath = path.join(__dirname, 'uploads', safeFilename);
+    
+    const uploadsDir = process.env.VERCEL ? '/tmp/uploads' : path.join(__dirname, 'uploads');
+    const filePath = path.join(uploadsDir, safeFilename);
     
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ error: 'File not found.' });
@@ -91,6 +93,8 @@ app.use('/api/academic', academicRoutes);
 app.use('/api/notes', notesRoutes);
 app.use('/api/ai', aiRoutes);
 app.use('/api/notifications', notificationsRoutes);
+app.use('/api/spotify', spotifyRoutes);
+app.use('/api/gamification', gamificationRoutes);
 
 // Health check endpoint
 app.get('/health', (req, res) => {
