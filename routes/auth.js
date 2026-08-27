@@ -83,18 +83,12 @@ router.post('/register', async (req, res) => {
     );
 
     // Send verification email with 6-digit OTP
-    const emailResult = await sendVerificationOTPEmail(email, otpCode);
-
-    let msg = 'Account created successfully! Please enter the 6-digit verification code sent to your email.';
-    if (emailResult && emailResult.isTestingRestriction) {
-      msg = `Account created! (Resend Testing Mode: Email sent to carlablvsh@gmail.com. For testing with this email, your verification code is: ${otpCode})`;
-    }
+    await sendVerificationOTPEmail(email, otpCode);
 
     res.status(201).json({
-      message: msg,
+      message: 'Account created successfully! Please enter the 6-digit verification code sent to your email.',
       requiresVerification: true,
-      email,
-      testingCode: (emailResult && emailResult.isTestingRestriction) ? otpCode : undefined
+      email
     });
   } catch (err) {
     console.error('Registration error:', err);
@@ -207,17 +201,9 @@ router.post('/resend-otp', async (req, res) => {
     );
 
     // Send email
-    const emailResult = await sendVerificationOTPEmail(email, otpCode);
+    await sendVerificationOTPEmail(email, otpCode);
 
-    let msg = 'A new 6-digit verification code has been sent to your email.';
-    if (emailResult && emailResult.isTestingRestriction) {
-      msg = `Resend Testing Mode: Email sent to carlablvsh@gmail.com. For testing with this email, your code is: ${otpCode}`;
-    }
-
-    res.json({ 
-      message: msg,
-      testingCode: (emailResult && emailResult.isTestingRestriction) ? otpCode : undefined
-    });
+    res.json({ message: 'A new 6-digit verification code has been sent to your email.' });
   } catch (err) {
     console.error('Resend OTP error:', err);
     res.status(500).json({ error: 'Server error sending verification code.' });
@@ -248,30 +234,22 @@ router.post('/login', loginLimiter, async (req, res) => {
     // Check email verification status
     if (user.is_verified === 0) {
       const now = Date.now();
-      let currentOtp = user.otp_code;
-      let emailResult = null;
 
       // Auto resend OTP if expired or last sent over 60s ago
       if (!user.otp_last_sent_at || (now - user.otp_last_sent_at) >= 60000) {
-        currentOtp = Math.floor(100000 + Math.random() * 900000).toString();
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
         const otpExpires = now + 10 * 60 * 1000;
         await dbRun(
           'UPDATE users SET otp_code = ?, otp_expires_at = ?, otp_last_sent_at = ? WHERE id = ?',
-          [currentOtp, otpExpires, now, user.id]
+          [otpCode, otpExpires, now, user.id]
         );
-        emailResult = await sendVerificationOTPEmail(user.email, currentOtp);
-      }
-
-      let errorMsg = 'Your email address is not verified yet. A verification code has been sent to your email.';
-      if (emailResult && emailResult.isTestingRestriction) {
-        errorMsg = `Email not verified yet. (Resend Testing Mode: Delivered to carlablvsh@gmail.com. For testing with this email, your code is: ${currentOtp})`;
+        await sendVerificationOTPEmail(user.email, otpCode);
       }
 
       return res.status(403).json({
-        error: errorMsg,
+        error: 'Your email address is not verified yet. A verification code has been sent to your email.',
         requiresVerification: true,
-        email: user.email,
-        testingCode: (emailResult && emailResult.isTestingRestriction) ? currentOtp : undefined
+        email: user.email
       });
     }
 

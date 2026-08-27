@@ -155,12 +155,10 @@ The Campusly Team`;
     console.error(`[EMAIL SERVICE] SMTP fallback error for ${toEmail}:`, err);
   }
 
-  // 3. Fallback: Console log
-  console.log(`\n======================================================`);
-  console.log(`[EMAIL FALLBACK - VERIFICATION OTP]`);
-  console.log(`To: ${toEmail}`);
-  console.log(`Code: ${otpCode}`);
-  console.log(`======================================================\n`);
+  // 3. Fallback: Local development console log (disabled in production)
+  if (!process.env.VERCEL && process.env.NODE_ENV === 'development') {
+    console.log(`[LOCAL DEV EMAIL] To: ${toEmail} | Code: ${otpCode}`);
+  }
   return { delivered: false };
 }
 
@@ -235,11 +233,9 @@ The Campusly Team`;
     console.error(`[EMAIL SERVICE] SMTP fallback error for ${toEmail}:`, err);
   }
 
-  // 3. Fallback: Console log
-  console.log(`\n======================================================`);
-  console.log(`[EMAIL FALLBACK - PASSWORD RESET]`);
-  console.log(`To: ${toEmail}`);
-  console.log(`Code/Token: ${otpCode || resetToken}`);
-  console.log(`======================================================\n`);
+  // 3. Fallback: Local development console log (disabled in production)
+  if (!process.env.VERCEL && process.env.NODE_ENV === 'development') {
+    console.log(`[LOCAL DEV EMAIL] To: ${toEmail} | Reset Code: ${otpCode || resetToken}`);
+  }
   return { delivered: false };
 }
