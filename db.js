@@ -156,6 +156,23 @@ export const initDB = async () => {
     try {
       await dbRun('ALTER TABLE users ADD COLUMN spotify_token_expires_at INTEGER');
     } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN is_verified INTEGER DEFAULT 0');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN otp_code TEXT');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN otp_expires_at INTEGER');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN otp_last_sent_at INTEGER');
+    } catch (err) {}
+
+    // Ensure existing users prior to OTP feature release are marked verified
+    try {
+      await dbRun('UPDATE users SET is_verified = 1 WHERE is_verified IS NULL OR is_verified = 0 AND (otp_code IS NULL AND created_at < CURRENT_TIMESTAMP)');
+    } catch (err) {}
 
     // Subjects Table
     await dbRun(`

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'url';
 import { dbRun, dbGet, dbAll } from '../db.js';
 import { authenticateToken } from '../middleware/auth.js';
 import { loginLimiter } from '../middleware/rateLimit.js';
-import { sendResetPasswordEmail } from '../utils/email.js';
+import { sendVerificationOTPEmail, sendResetPasswordEmail } from '../utils/email.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -71,28 +71,142 @@ router.post('/register', async (req, res) => {
     // Generate UUID
     const userId = crypto.randomUUID();
 
-    // Insert user into database
+    // Generate 6-digit numeric OTP
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = Date.now() + 10 * 60 * 1000; // 10 minutes
+    const now = Date.now();
+
+    // Insert user into database (unverified by default)
     await dbRun(
-      'INSERT INTO users (id, username, email, password_hash) VALUES (?, ?, ?, ?)',
-      [userId, username, email, passwordHash]
+      'INSERT INTO users (id, username, email, password_hash, is_verified, otp_code, otp_expires_at, otp_last_sent_at) VALUES (?, ?, ?, ?, 0, ?, ?, ?)',
+      [userId, username, email, passwordHash, otpCode, otpExpires, now]
     );
 
-    // Generate JWT
-    const token = jwt.sign({ userId, username, email }, JWT_SECRET, { expiresIn: '7d' });
+    // Send verification email with 6-digit OTP
+    await sendVerificationOTPEmail(email, otpCode);
 
     res.status(201).json({
-      token,
-      user: {
-        id: userId,
-        username,
-        email,
-        avatar_url: null,
-        hasGeminiKey: false
-      }
+      message: 'Account created successfully! Please enter the 6-digit verification code sent to your email.',
+      requiresVerification: true,
+      email
     });
   } catch (err) {
     console.error('Registration error:', err);
     res.status(500).json({ error: 'Server error during registration.' });
+  }
+});
+
+// Verify 6-digit OTP Route
+router.post('/verify-otp', async (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) {
+    return res.status(400).json({ error: 'Email and 6-digit verification code are required.' });
+  }
+
+  try {
+    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
+    if (!user) {
+      return res.status(404).json({ error: 'User account not found.' });
+    }
+
+    // If user is already verified, allow login immediately
+    if (user.is_verified === 1) {
+      const token = jwt.sign({ userId: user.id, username: user.username, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+      return res.json({
+        message: 'Account is already verified.',
+        token,
+        user: {
+          id: user.id,
+          username: user.username,
+          email: user.email,
+          avatar_url: user.avatar_url,
+          hasGeminiKey: !!user.gemini_api_key
+        }
+      });
+    }
+
+    // Validate OTP Code
+    const cleanOtp = String(otp).trim();
+    if (!user.otp_code || user.otp_code !== cleanOtp) {
+      return res.status(400).json({ error: 'Invalid 6-digit verification code. Please check your email and try again.' });
+    }
+
+    // Check expiration
+    if (!user.otp_expires_at || Date.now() > user.otp_expires_at) {
+      return res.status(400).json({ error: 'Verification code has expired. Please click "Resend Code" to receive a new code.' });
+    }
+
+    // Update user as verified and clear OTP
+    await dbRun(
+      'UPDATE users SET is_verified = 1, otp_code = NULL, otp_expires_at = NULL WHERE id = ?',
+      [user.id]
+    );
+
+    // Generate JWT token
+    const token = jwt.sign({ userId: user.id, username: user.username, email: user.email }, JWT_SECRET, { expiresIn: '7d' });
+
+    res.json({
+      message: 'Email verified successfully! Welcome to Campusly.',
+      token,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        avatar_url: user.avatar_url,
+        hasGeminiKey: !!user.gemini_api_key
+      }
+    });
+  } catch (err) {
+    console.error('Verify OTP error:', err);
+    res.status(500).json({ error: 'Server error verifying code.' });
+  }
+});
+
+// Resend OTP Route with Rate Limiting (60 Seconds)
+router.post('/resend-otp', async (req, res) => {
+  const { email } = req.body;
+
+  if (!email) {
+    return res.status(400).json({ error: 'Email is required.' });
+  }
+
+  try {
+    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
+    if (!user) {
+      return res.status(404).json({ error: 'User account not found.' });
+    }
+
+    if (user.is_verified === 1) {
+      return res.status(400).json({ error: 'Account is already verified. You can sign in directly.' });
+    }
+
+    // Enforce 60-second rate limit
+    const now = Date.now();
+    if (user.otp_last_sent_at && (now - user.otp_last_sent_at) < 60000) {
+      const waitSeconds = Math.ceil((60000 - (now - user.otp_last_sent_at)) / 1000);
+      return res.status(429).json({ 
+        error: `Please wait ${waitSeconds} seconds before requesting a new code.`,
+        retryAfterSeconds: waitSeconds
+      });
+    }
+
+    // Generate fresh 6-digit OTP
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const otpExpires = now + 10 * 60 * 1000; // 10 minutes
+
+    await dbRun(
+      'UPDATE users SET otp_code = ?, otp_expires_at = ?, otp_last_sent_at = ? WHERE id = ?',
+      [otpCode, otpExpires, now, user.id]
+    );
+
+    // Send email
+    await sendVerificationOTPEmail(email, otpCode);
+
+    res.json({ message: 'A new 6-digit verification code has been sent to your email.' });
+  } catch (err) {
+    console.error('Resend OTP error:', err);
+    res.status(500).json({ error: 'Server error sending verification code.' });
   }
 });
 
@@ -115,6 +229,27 @@ router.post('/login', loginLimiter, async (req, res) => {
     const isMatch = await bcrypt.compare(password, user.password_hash);
     if (!isMatch) {
       return res.status(400).json({ error: 'Invalid email or password.' });
+    }
+
+    // Check email verification status
+    if (user.is_verified === 0) {
+      const now = Date.now();
+      // Auto resend OTP if expired or last sent over 60s ago
+      if (!user.otp_last_sent_at || (now - user.otp_last_sent_at) >= 60000) {
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const otpExpires = now + 10 * 60 * 1000;
+        await dbRun(
+          'UPDATE users SET otp_code = ?, otp_expires_at = ?, otp_last_sent_at = ? WHERE id = ?',
+          [otpCode, otpExpires, now, user.id]
+        );
+        await sendVerificationOTPEmail(user.email, otpCode);
+      }
+
+      return res.status(403).json({
+        error: 'Your email address is not verified yet. A verification code has been sent to your email.',
+        requiresVerification: true,
+        email: user.email
+      });
     }
 
     // Generate JWT
@@ -305,19 +440,20 @@ router.post('/forgot-password', async (req, res) => {
     const user = await dbGet('SELECT id FROM users WHERE email = ?', [email]);
     
     // Always return a success message to prevent user enumeration
-    const successMsg = 'If this email exists in our system, we have sent a password reset token to it.';
+    const successMsg = 'If this email exists in our system, we have sent a password reset code to it.';
     if (!user) {
       return res.json({ message: successMsg });
     }
 
-    // Generate secure random token
+    // Generate secure random token AND 6-digit OTP
     const token = crypto.randomBytes(20).toString('hex');
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const expires = Date.now() + 3600000; // 1 hour validity
 
-    await dbRun('UPDATE users SET reset_token = ?, reset_token_expires = ? WHERE id = ?', [token, expires, user.id]);
+    await dbRun('UPDATE users SET reset_token = ?, reset_token_expires = ?, otp_code = ? WHERE id = ?', [token, expires, otpCode, user.id]);
 
     // Send the email using the SMTP service
-    await sendResetPasswordEmail(email, token);
+    await sendResetPasswordEmail(email, token, otpCode);
 
     res.json({ message: successMsg });
   } catch (err) {
@@ -328,10 +464,10 @@ router.post('/forgot-password', async (req, res) => {
 
 // Reset Password Route
 router.post('/reset-password', async (req, res) => {
-  const { token, newPassword } = req.body;
+  const { email, token, newPassword } = req.body;
 
   if (!token || !newPassword) {
-    return res.status(400).json({ error: 'Token and new password are required.' });
+    return res.status(400).json({ error: 'Reset token/code and new password are required.' });
   }
 
   if (newPassword.length < 6) {
@@ -339,26 +475,37 @@ router.post('/reset-password', async (req, res) => {
   }
 
   try {
-    const user = await dbGet(
-      'SELECT id, reset_token_expires FROM users WHERE reset_token = ?',
-      [token]
+    const cleanToken = String(token).trim();
+    
+    // Search user by reset_token OR otp_code
+    let user = await dbGet(
+      'SELECT id, reset_token_expires FROM users WHERE reset_token = ? OR otp_code = ?',
+      [cleanToken, cleanToken]
     );
 
+    if (!user && email) {
+      user = await dbGet(
+        'SELECT id, reset_token_expires FROM users WHERE email = ? AND (reset_token = ? OR otp_code = ?)',
+        [email, cleanToken, cleanToken]
+      );
+    }
+
     if (!user) {
-      return res.status(400).json({ error: 'Password reset token is invalid.' });
+      return res.status(400).json({ error: 'Password reset code or token is invalid.' });
     }
 
     const now = Date.now();
-    if (user.reset_token_expires < now) {
-      return res.status(400).json({ error: 'Password reset token has expired.' });
+    if (!user.reset_token_expires || user.reset_token_expires < now) {
+      return res.status(400).json({ error: 'Password reset code has expired. Please request a new one.' });
     }
 
     // Hash and store the new password
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(newPassword, salt);
 
+    // Update password and clear single-use reset fields
     await dbRun(
-      'UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL WHERE id = ?',
+      'UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL, otp_code = NULL WHERE id = ?',
       [passwordHash, user.id]
     );
 
