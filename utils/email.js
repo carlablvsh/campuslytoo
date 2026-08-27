@@ -33,18 +33,18 @@ async function sendResendEmail({ to, subject, html, text }) {
 
     if (!response.ok) {
       if (data && data.name === 'validation_error' && data.message && data.message.includes('only send testing emails')) {
-        console.warn(`[RESEND NOTICE] Could not deliver email to ${to} because Resend is in Testing Mode (using onboarding@resend.dev). In testing mode, Resend ONLY delivers emails to the account owner (carlablvsh@gmail.com). To send to any email address, verify a domain at resend.com/domains!`);
-      } else {
-        console.error('[RESEND EMAIL SERVICE] Resend API error response:', data);
+        console.warn(`[RESEND NOTICE] Could not deliver email to ${to} because Resend is in Testing Mode (using onboarding@resend.dev). In testing mode, Resend ONLY delivers emails to the account owner (carlablvsh@gmail.com).`);
+        return { success: false, isTestingRestriction: true };
       }
-      return false;
+      console.error('[RESEND EMAIL SERVICE] Resend API error response:', data);
+      return { success: false, error: data.message || 'Resend error' };
     }
 
     console.log(`[RESEND EMAIL SERVICE] 📬 Email successfully sent to ${to} via Resend. Message ID: ${data.id}`);
-    return true;
+    return { success: true, delivered: true, id: data.id };
   } catch (err) {
     console.error('[RESEND EMAIL SERVICE] Failed to send email via Resend API:', err);
-    return false;
+    return { success: false, error: err.message };
   }
 }
 
@@ -132,8 +132,13 @@ The Campusly Team`;
   `;
 
   // 1. Primary: Resend API
-  const resendSuccess = await sendResendEmail({ to: toEmail, subject, html, text });
-  if (resendSuccess) return true;
+  const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
+  if (resendResult.success) {
+    return { delivered: true };
+  }
+  if (resendResult.isTestingRestriction) {
+    return { delivered: false, isTestingRestriction: true };
+  }
 
   // 2. Fallback: SMTP / Ethereal
   try {
@@ -144,7 +149,7 @@ The Campusly Team`;
       console.log(`[EMAIL SERVICE] OTP email sent to ${toEmail} via SMTP: ${info.messageId}`);
       const previewUrl = nodemailer.getTestMessageUrl(info);
       if (previewUrl) console.log(`[EMAIL SERVICE] 📬 Ethereal Preview: ${previewUrl}`);
-      return true;
+      return { delivered: true };
     }
   } catch (err) {
     console.error(`[EMAIL SERVICE] SMTP fallback error for ${toEmail}:`, err);
@@ -156,7 +161,7 @@ The Campusly Team`;
   console.log(`To: ${toEmail}`);
   console.log(`Code: ${otpCode}`);
   console.log(`======================================================\n`);
-  return false;
+  return { delivered: false };
 }
 
 /**
@@ -207,8 +212,13 @@ The Campusly Team`;
   `;
 
   // 1. Primary: Resend API
-  const resendSuccess = await sendResendEmail({ to: toEmail, subject, html, text });
-  if (resendSuccess) return true;
+  const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
+  if (resendResult.success) {
+    return { delivered: true };
+  }
+  if (resendResult.isTestingRestriction) {
+    return { delivered: false, isTestingRestriction: true };
+  }
 
   // 2. Fallback: SMTP / Ethereal
   try {
@@ -219,7 +229,7 @@ The Campusly Team`;
       console.log(`[EMAIL SERVICE] Reset email sent to ${toEmail} via SMTP: ${info.messageId}`);
       const previewUrl = nodemailer.getTestMessageUrl(info);
       if (previewUrl) console.log(`[EMAIL SERVICE] 📬 Ethereal Preview: ${previewUrl}`);
-      return true;
+      return { delivered: true };
     }
   } catch (err) {
     console.error(`[EMAIL SERVICE] SMTP fallback error for ${toEmail}:`, err);
@@ -231,5 +241,5 @@ The Campusly Team`;
   console.log(`To: ${toEmail}`);
   console.log(`Code/Token: ${otpCode || resetToken}`);
   console.log(`======================================================\n`);
-  return false;
+  return { delivered: false };
 }
