@@ -382,8 +382,8 @@ router.get('/attendance', authenticateToken, async (req, res) => {
   }
 });
 
-// Log attendance (creates or updates for a specific subject and date)
-router.post('/attendance', authenticateToken, async (req, res) => {
+// Log attendance handler function
+const handleLogAttendance = async (req, res) => {
   const { subject_id, date, status } = req.body;
 
   if (!subject_id || !date || !status) {
@@ -396,7 +396,7 @@ router.post('/attendance', authenticateToken, async (req, res) => {
 
   try {
     // Verify subject ownership
-    const subject = await dbGet('SELECT id FROM subjects WHERE id = ? AND user_id = ?', [subject_id, req.userId]);
+    const subject = await dbGet('SELECT id, name, code FROM subjects WHERE id = ? AND user_id = ?', [subject_id, req.userId]);
     if (!subject) {
       return res.status(404).json({ error: 'Subject not found or unauthorized.' });
     }
@@ -424,7 +424,11 @@ router.post('/attendance', authenticateToken, async (req, res) => {
     console.error('Log attendance error:', err);
     res.status(500).json({ error: 'Server error tracking attendance.' });
   }
-});
+};
+
+// Log attendance endpoints (support both /attendance and /attendance/log)
+router.post('/attendance', authenticateToken, handleLogAttendance);
+router.post('/attendance/log', authenticateToken, handleLogAttendance);
 
 // Get attendance dashboard stats & simulator values
 router.get('/attendance/stats', authenticateToken, async (req, res) => {

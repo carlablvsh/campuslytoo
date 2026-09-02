@@ -215,12 +215,16 @@ router.post('/login', loginLimiter, async (req, res) => {
   const { email, password } = req.body;
 
   if (!email || !password) {
-    return res.status(400).json({ error: 'Email and password are required.' });
+    return res.status(400).json({ error: 'Email/username and password are required.' });
   }
 
   try {
-    // Find user
-    const user = await dbGet('SELECT * FROM users WHERE email = ?', [email]);
+    const cleanInput = String(email).trim();
+    // Find user by email OR username (case-insensitive)
+    const user = await dbGet(
+      'SELECT * FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)',
+      [cleanInput, cleanInput]
+    );
     if (!user) {
       return res.status(400).json({ error: 'Invalid email or password.' });
     }
@@ -438,7 +442,11 @@ router.post('/forgot-password', async (req, res) => {
   }
 
   try {
-    const user = await dbGet('SELECT id FROM users WHERE email = ?', [email]);
+    const cleanInput = String(email).trim();
+    const user = await dbGet(
+      'SELECT id, email, username FROM users WHERE LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)',
+      [cleanInput, cleanInput]
+    );
     
     // Always return a success message to prevent user enumeration
     const successMsg = 'If this email exists in our system, we have sent a password reset code to it.';
@@ -454,7 +462,8 @@ router.post('/forgot-password', async (req, res) => {
     await dbRun('UPDATE users SET reset_token = ?, reset_token_expires = ?, otp_code = ? WHERE id = ?', [token, expires, otpCode, user.id]);
 
     // Send the email using the SMTP service
-    await sendResetPasswordEmail(email, token, otpCode);
+    const emailResult = await sendResetPasswordEmail(user.email, token, otpCode);
+    console.log(`[FORGOT PASSWORD] Sent OTP ${otpCode} to ${user.email}, result:`, emailResult);
 
     res.json({ message: successMsg });
   } catch (err) {
@@ -468,7 +477,7 @@ router.post('/reset-password', async (req, res) => {
   const { email, token, newPassword } = req.body;
 
   if (!token || !newPassword) {
-    return res.status(400).json({ error: 'Reset token/code and new password are required.' });
+    return res.status(400).json({ error: 'Reset code and new password are required.' });
   }
 
   if (newPassword.length < 6) {
@@ -477,22 +486,25 @@ router.post('/reset-password', async (req, res) => {
 
   try {
     const cleanToken = String(token).trim();
+    const cleanEmail = email ? String(email).trim() : '';
     
-    // Search user by reset_token OR otp_code
-    let user = await dbGet(
-      'SELECT id, reset_token_expires FROM users WHERE reset_token = ? OR otp_code = ?',
-      [cleanToken, cleanToken]
-    );
-
-    if (!user && email) {
+    // Search user by reset_token OR otp_code (also check email if provided)
+    let user = null;
+    if (cleanEmail) {
       user = await dbGet(
-        'SELECT id, reset_token_expires FROM users WHERE email = ? AND (reset_token = ? OR otp_code = ?)',
-        [email, cleanToken, cleanToken]
+        'SELECT id, reset_token_expires FROM users WHERE (LOWER(email) = LOWER(?) OR LOWER(username) = LOWER(?)) AND (reset_token = ? OR otp_code = ?)',
+        [cleanEmail, cleanEmail, cleanToken, cleanToken]
+      );
+    }
+    if (!user) {
+      user = await dbGet(
+        'SELECT id, reset_token_expires FROM users WHERE reset_token = ? OR otp_code = ?',
+        [cleanToken, cleanToken]
       );
     }
 
     if (!user) {
-      return res.status(400).json({ error: 'Password reset code or token is invalid.' });
+      return res.status(400).json({ error: 'Password reset code is invalid.' });
     }
 
     const now = Date.now();
@@ -506,7 +518,7 @@ router.post('/reset-password', async (req, res) => {
 
     // Update password and clear single-use reset fields
     await dbRun(
-      'UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL, otp_code = NULL WHERE id = ?',
+      'UPDATE users SET password_hash = ?, reset_token = NULL, reset_token_expires = NULL, otp_code = NULL, is_verified = 1 WHERE id = ?',
       [passwordHash, user.id]
     );
 
