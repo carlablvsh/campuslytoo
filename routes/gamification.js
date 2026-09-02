@@ -720,4 +720,39 @@ router.post('/study-session', authenticateToken, async (req, res) => {
   }
 });
 
+// =========================================================================
+// ROUTE: POST /api/gamification/check-in
+// Claim daily check-in XP bonus
+// =========================================================================
+router.post('/check-in', authenticateToken, async (req, res) => {
+  try {
+    const userId = req.userId || req.user?.id;
+    const todayStr = new Date().toISOString().split('T')[0];
+    const refId = `checkin_${todayStr}`;
+
+    const existing = await dbGet(
+      'SELECT id FROM xp_logs WHERE user_id = ? AND reference_id = ?',
+      [userId, refId]
+    );
+
+    if (existing) {
+      return res.status(400).json({ error: 'You have already claimed your daily check-in today! Come back tomorrow.' });
+    }
+
+    const result = await awardXP(userId, 'daily_streak', 'daily_checkin', refId, {
+      type: 'daily_checkin',
+      date: todayStr
+    });
+
+    res.json({
+      success: true,
+      awardedXP: result ? result.xpAmount : 15,
+      message: 'Daily check-in claimed! +15 XP added to your standing.'
+    });
+  } catch (err) {
+    console.error('Error logging daily check-in:', err);
+    res.status(500).json({ error: 'Failed to record daily check-in.' });
+  }
+});
+
 export default router;
