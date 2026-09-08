@@ -39,8 +39,8 @@ router.get('/', authenticateToken, async (req, res) => {
       SELECT a.*, s.name as subject_name, s.code as subject_code, s.color as subject_color
       FROM assignments a
       JOIN subjects s ON a.subject_id = s.id
-      WHERE a.user_id = ? AND a.status = 'pending' AND a.due_date >= ?
-      ORDER BY a.due_date ASC
+      WHERE a.user_id = ? AND a.status = 'pending' AND (a.due_date >= ? OR a.due_date IS NULL OR a.due_date = '')
+      ORDER BY CASE WHEN a.due_date IS NULL OR a.due_date = '' THEN 1 ELSE 0 END, a.due_date ASC
       LIMIT 5
     `, [req.userId, clientDate]);
 

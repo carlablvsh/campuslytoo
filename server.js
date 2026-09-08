@@ -107,12 +107,14 @@ app.use((err, req, res, next) => {
   res.status(500).json({ error: 'Internal Server Error' });
 });
 
-app.listen(PORT, () => {
-  console.log(`================================================`);
-  console.log(` Campusly server is online!`);
-  console.log(` Port: ${PORT}`);
-  console.log(` API Endpoint: http://localhost:${PORT}/api`);
-  console.log(`================================================`);
-});
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`================================================`);
+    console.log(` Campusly server is online!`);
+    console.log(` Port: ${PORT}`);
+    console.log(` API Endpoint: http://localhost:${PORT}/api`);
+    console.log(`================================================`);
+  });
+}
 
 export default app;
