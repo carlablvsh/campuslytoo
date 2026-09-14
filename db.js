@@ -1,4 +1,3 @@
-import sqlite3 from 'sqlite3';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
@@ -11,7 +10,6 @@ const tursoUrl = process.env.TURSO_DATABASE_URL;
 const tursoToken = process.env.TURSO_AUTH_TOKEN;
 const useTurso = !!tursoUrl;
 
-let db = null;
 let client = null;
 
 if (useTurso) {
@@ -21,110 +19,67 @@ if (useTurso) {
   });
   console.log('Connected to persistent Turso cloud database at:', tursoUrl);
 } else {
-  // Local SQLite fallback path
+  // Local SQLite / LibSQL file path
   let dbPath = path.resolve(__dirname, 'campusly.db');
 
   if (process.env.VERCEL) {
     const tmpPath = '/tmp/campusly.db';
     try {
       if (!fs.existsSync(tmpPath)) {
-        fs.copyFileSync(dbPath, tmpPath);
-        console.log('Database copied to temporary write space:', tmpPath);
+        if (fs.existsSync(dbPath)) {
+          fs.copyFileSync(dbPath, tmpPath);
+          console.log('Database copied to temporary write space:', tmpPath);
+        } else {
+          console.log('Template database not present in bundle, initializing new database in /tmp');
+        }
       }
       dbPath = tmpPath;
     } catch (copyErr) {
-      console.error('Failed to copy database to write space:', copyErr);
+      console.error('Database write space notice:', copyErr.message);
+      dbPath = tmpPath;
     }
   }
 
-  db = new sqlite3.Database(dbPath, (err) => {
-    if (err) {
-      console.error('Error opening database', err.message);
-    } else {
-      console.log('Connected to SQLite database at:', dbPath);
-    }
+  // Ensure file protocol prefix for LibSQL local file driver
+  const fileUrl = dbPath.startsWith('file:') ? dbPath : `file:${dbPath}`;
+  client = createClient({
+    url: fileUrl
   });
+  console.log('Connected to LibSQL database at:', fileUrl);
 }
 
-// Helper utilities to wrap sqlite3 or Turso client queries in Promises
-export const dbRun = (sql, params = []) => {
-  if (useTurso) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const res = await client.execute({ sql, args: params });
-        const lastID = res.lastInsertRowid !== undefined ? Number(res.lastInsertRowid) : null;
-        resolve({ id: lastID, changes: res.rowsAffected });
-      } catch (err) {
-        reject(err);
-      }
-    });
-  } else {
-    return new Promise((resolve, reject) => {
-      db.run(sql, params, function (err) {
-        if (err) {
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, changes: this.changes });
-        }
-      });
-    });
+// Helper utilities to wrap LibSQL client queries in Promises
+export const dbRun = async (sql, params = []) => {
+  try {
+    const res = await client.execute({ sql, args: params });
+    const lastID = res.lastInsertRowid !== undefined ? Number(res.lastInsertRowid) : null;
+    return { id: lastID, changes: res.rowsAffected };
+  } catch (err) {
+    throw err;
   }
 };
 
-export const dbGet = (sql, params = []) => {
-  if (useTurso) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const res = await client.execute({ sql, args: params });
-        resolve(res.rows[0] || undefined);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  } else {
-    return new Promise((resolve, reject) => {
-      db.get(sql, params, (err, row) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(row);
-        }
-      });
-    });
+export const dbGet = async (sql, params = []) => {
+  try {
+    const res = await client.execute({ sql, args: params });
+    return res.rows[0] || undefined;
+  } catch (err) {
+    throw err;
   }
 };
 
-export const dbAll = (sql, params = []) => {
-  if (useTurso) {
-    return new Promise(async (resolve, reject) => {
-      try {
-        const res = await client.execute({ sql, args: params });
-        resolve(res.rows || []);
-      } catch (err) {
-        reject(err);
-      }
-    });
-  } else {
-    return new Promise((resolve, reject) => {
-      db.all(sql, params, (err, rows) => {
-        if (err) {
-          reject(err);
-        } else {
-          resolve(rows);
-        }
-      });
-    });
+export const dbAll = async (sql, params = []) => {
+  try {
+    const res = await client.execute({ sql, args: params });
+    return res.rows || [];
+  } catch (err) {
+    throw err;
   }
 };
 
 // Initialize database schema tables
 export const initDB = async () => {
   try {
-    if (!useTurso) {
-      // Enable Foreign Keys support (disabled on Vercel to allow serverless stateless operation)
-      await dbRun(process.env.VERCEL ? 'PRAGMA foreign_keys = OFF;' : 'PRAGMA foreign_keys = ON;');
-    }
-
     // Users Table
     await dbRun(`
       CREATE TABLE IF NOT EXISTS users (
@@ -167,6 +122,9 @@ export const initDB = async () => {
     } catch (err) {}
     try {
       await dbRun('ALTER TABLE users ADD COLUMN otp_last_sent_at INTEGER');
+    } catch (err) {}
+    try {
+      await dbRun('ALTER TABLE users ADD COLUMN gemini_api_key TEXT');
     } catch (err) {}
 
     // Ensure existing users prior to OTP feature release are marked verified
@@ -392,4 +350,4 @@ export const initDB = async () => {
   }
 };
 
-export default db;
+export default client;
