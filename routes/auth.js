@@ -83,7 +83,11 @@ router.post('/register', async (req, res) => {
     );
 
     // Send verification email with 6-digit OTP
-    await sendVerificationOTPEmail(email, otpCode);
+    try {
+      await sendVerificationOTPEmail(email, otpCode);
+    } catch (emailErr) {
+      console.error('Email dispatch notice on registration:', emailErr);
+    }
 
     res.status(201).json({
       message: 'Account created successfully! Please enter the 6-digit verification code sent to your email.',

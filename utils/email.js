@@ -71,7 +71,10 @@ async function getTransporter() {
       host,
       port: parseInt(String(port), 10),
       secure: parseInt(String(port), 10) === 465,
-      auth: { user, pass }
+      auth: { user, pass },
+      connectionTimeout: 3000,
+      greetingTimeout: 3000,
+      socketTimeout: 3000
     });
   }
 
@@ -86,7 +89,10 @@ async function getTransporter() {
         auth: {
           user: testAccount.user,
           pass: testAccount.pass
-        }
+        },
+        connectionTimeout: 3000,
+        greetingTimeout: 3000,
+        socketTimeout: 3000
       });
       console.log(`[EMAIL SERVICE] Ethereal test account created! User: ${testAccount.user}`);
     } catch (err) {
@@ -137,7 +143,15 @@ The Campusly Team`;
 </body>
 </html>`;
 
-  // 1. Primary: SMTP (Gmail / Custom SMTP)
+  // On Vercel serverless functions, try HTTPS Resend API first since port 443 is unrestricted
+  if (process.env.VERCEL) {
+    const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
+    if (resendResult.success) {
+      return { delivered: true };
+    }
+  }
+
+  // Primary SMTP
   try {
     const fromAddress = process.env.SMTP_FROM || DEFAULT_SMTP.from;
     const transporter = await getTransporter();
@@ -147,13 +161,15 @@ The Campusly Team`;
       return { delivered: true };
     }
   } catch (err) {
-    console.error(`[EMAIL SERVICE] SMTP error sending to ${toEmail}:`, err);
+    console.error(`[EMAIL SERVICE] SMTP error sending to ${toEmail}:`, err.message);
   }
 
-  // 2. Secondary: Resend API
-  const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
-  if (resendResult.success) {
-    return { delivered: true };
+  // Fallback to Resend if not on Vercel or if SMTP failed
+  if (!process.env.VERCEL) {
+    const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
+    if (resendResult.success) {
+      return { delivered: true };
+    }
   }
 
   return { delivered: false };
@@ -202,7 +218,15 @@ The Campusly Team`;
 </body>
 </html>`;
 
-  // 1. Primary: SMTP (Gmail / Custom SMTP)
+  // On Vercel serverless functions, try HTTPS Resend API first since port 443 is unrestricted
+  if (process.env.VERCEL) {
+    const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
+    if (resendResult.success) {
+      return { delivered: true };
+    }
+  }
+
+  // Primary SMTP
   try {
     const fromAddress = process.env.SMTP_FROM || DEFAULT_SMTP.from;
     const transporter = await getTransporter();
@@ -212,13 +236,15 @@ The Campusly Team`;
       return { delivered: true };
     }
   } catch (err) {
-    console.error(`[EMAIL SERVICE] SMTP error sending reset email to ${toEmail}:`, err);
+    console.error(`[EMAIL SERVICE] SMTP error sending reset email to ${toEmail}:`, err.message);
   }
 
-  // 2. Secondary: Resend API
-  const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
-  if (resendResult.success) {
-    return { delivered: true };
+  // Fallback to Resend if not on Vercel or if SMTP failed
+  if (!process.env.VERCEL) {
+    const resendResult = await sendResendEmail({ to: toEmail, subject, html, text });
+    if (resendResult.success) {
+      return { delivered: true };
+    }
   }
 
   return { delivered: false };
