@@ -2,6 +2,15 @@ import nodemailer from 'nodemailer';
 
 let testAccountTransporter = null;
 
+// Default email configuration fallbacks
+const DEFAULT_SMTP = {
+  host: 'smtp.gmail.com',
+  port: 587,
+  user: 'campusly.noreply@gmail.com',
+  pass: 'uqexobogxmcagqjx',
+  from: 'Campusly Support <campusly.noreply@gmail.com>'
+};
+
 /**
  * Helper: Send email via Resend API
  */
@@ -10,7 +19,7 @@ async function sendResendEmail({ to, subject, html, text }) {
   const fromAddress = process.env.RESEND_FROM || process.env.SMTP_FROM || 'Campusly <onboarding@resend.dev>';
 
   if (!apiKey) {
-    return false;
+    return { success: false, error: 'No Resend API key configured' };
   }
 
   try {
@@ -52,16 +61,16 @@ async function sendResendEmail({ to, subject, html, text }) {
  * Helper: Get SMTP / Ethereal transporter fallback
  */
 async function getTransporter() {
-  const host = process.env.SMTP_HOST;
-  const port = process.env.SMTP_PORT || 587;
-  const user = process.env.SMTP_USER;
-  const pass = process.env.SMTP_PASS;
+  const host = process.env.SMTP_HOST || DEFAULT_SMTP.host;
+  const port = process.env.SMTP_PORT || DEFAULT_SMTP.port;
+  const user = process.env.SMTP_USER || DEFAULT_SMTP.user;
+  const pass = process.env.SMTP_PASS || DEFAULT_SMTP.pass;
 
   if (host && user && pass) {
     return nodemailer.createTransport({
       host,
-      port: parseInt(port, 10),
-      secure: parseInt(port, 10) === 465,
+      port: parseInt(String(port), 10),
+      secure: parseInt(String(port), 10) === 465,
       auth: { user, pass }
     });
   }
@@ -129,18 +138,16 @@ The Campusly Team`;
 </html>`;
 
   // 1. Primary: SMTP (Gmail / Custom SMTP)
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    try {
-      const fromAddress = process.env.SMTP_FROM || 'Campusly Support <campusly.noreply@gmail.com>';
-      const transporter = await getTransporter();
-      if (transporter) {
-        const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
-        console.log(`[EMAIL SERVICE] 📬 OTP email successfully sent to ${toEmail} via SMTP: ${info.messageId}`);
-        return { delivered: true };
-      }
-    } catch (err) {
-      console.error(`[EMAIL SERVICE] SMTP error sending to ${toEmail}:`, err);
+  try {
+    const fromAddress = process.env.SMTP_FROM || DEFAULT_SMTP.from;
+    const transporter = await getTransporter();
+    if (transporter) {
+      const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
+      console.log(`[EMAIL SERVICE] 📬 OTP email successfully sent to ${toEmail} via SMTP: ${info.messageId}`);
+      return { delivered: true };
     }
+  } catch (err) {
+    console.error(`[EMAIL SERVICE] SMTP error sending to ${toEmail}:`, err);
   }
 
   // 2. Secondary: Resend API
@@ -196,18 +203,16 @@ The Campusly Team`;
 </html>`;
 
   // 1. Primary: SMTP (Gmail / Custom SMTP)
-  if (process.env.SMTP_HOST && process.env.SMTP_USER && process.env.SMTP_PASS) {
-    try {
-      const fromAddress = process.env.SMTP_FROM || 'Campusly Support <campusly.noreply@gmail.com>';
-      const transporter = await getTransporter();
-      if (transporter) {
-        const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
-        console.log(`[EMAIL SERVICE] 📬 Password reset email successfully sent to ${toEmail} via SMTP: ${info.messageId}`);
-        return { delivered: true };
-      }
-    } catch (err) {
-      console.error(`[EMAIL SERVICE] SMTP error sending reset email to ${toEmail}:`, err);
+  try {
+    const fromAddress = process.env.SMTP_FROM || DEFAULT_SMTP.from;
+    const transporter = await getTransporter();
+    if (transporter) {
+      const info = await transporter.sendMail({ from: fromAddress, to: toEmail, subject, text, html });
+      console.log(`[EMAIL SERVICE] 📬 Password reset email successfully sent to ${toEmail} via SMTP: ${info.messageId}`);
+      return { delivered: true };
     }
+  } catch (err) {
+    console.error(`[EMAIL SERVICE] SMTP error sending reset email to ${toEmail}:`, err);
   }
 
   // 2. Secondary: Resend API
